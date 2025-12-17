@@ -1,0 +1,5 @@
+﻿sc2_new_env/
+logs/
+**/__pycache__/
+*.pyc
+*.pth

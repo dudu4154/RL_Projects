@@ -1,0 +1,1167 @@
+import random
+import pysc2.lib.colors as sc2_colors
+
+# 自動修復 pysc2 在 Python 3.11+ 的 Random.shuffle() 報錯問題
+def fixed_shuffled_hue(n):
+    hue = [i / n for i in range(n)]
+    random.shuffle(hue) 
+    return hue
+
+sc2_colors.shuffled_hue = fixed_shuffled_hue
+
+import sys
+import os
+import glob
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import torch.optim as optim
+import numpy as np
+import random
+import datetime
+import traceback
+import math 
+import time
+
+from absl import app
+from pysc2.env import sc2_env
+from pysc2.lib import actions, features, units
+from torch.utils.tensorboard import SummaryWriter
+
+# === 1. 全域參數與常數設定 ===
+LR = 0.0003
+GAMMA = 0.99
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+TOTAL_EPISODES = 10000 
+PROBE_TARGET = 15 # 腳本階段目標工兵數
+
+# --- Epsilon (探索率) 設定 ---
+EPSILON_START = 0.9
+EPSILON_END = 0.05       # 永遠不會等於 0
+EPSILON_DECAY = 0.999    # 衰減率
+SAVE_INTERVAL_MINUTES = 30
+MAX_TO_KEEP = 5
+
+# --- 獎勵參數 ---
+REWARD_KILL = 1.0        # 擊殺一個單位的獎勵
+REWARD_WIPEOUT = 10.0    # 全滅敵人的獎勵
+REWARD_TIME_PENALTY = -0.002 # 每一步的時間懲罰 (逼它快點打完)
+
+# --- 神族單位 ID ---
+NEXUS_ID = 59 
+PYLON_ID = 60
+ASSIMILATOR_ID = 61      
+GATEWAY_ID = 62          
+CYBERNETICS_CORE_ID = 72 
+STALKER_ID = 74          
+PROBE_ID = 84
+MINERAL_FIELD_ID = 341
+GEYSER_ID = 342          
+
+# --- 人族單位 ID (給對手用) ---
+COMMAND_CENTER_ID = 18
+SUPPLY_DEPOT_ID = 19
+REFINERY_ID = 20
+BARRACKS_ID = 21         
+BARRACKS_TECHLAB_ID = 37 
+SCV_ID = 45
+MARAUDER_ID = 51         
+
+# --- 動作 ID ---
+# Protoss Actions
+BUILD_PYLON_ACTION = actions.FUNCTIONS.Build_Pylon_screen.id
+BUILD_ASSIMILATOR_ACTION = actions.FUNCTIONS.Build_Assimilator_screen.id
+BUILD_GATEWAY_ACTION = actions.FUNCTIONS.Build_Gateway_screen.id 
+BUILD_CYBERNETICS_CORE_ACTION = actions.FUNCTIONS.Build_CyberneticsCore_screen.id 
+TRAIN_PROBE_ACTION = actions.FUNCTIONS.Train_Probe_quick.id
+TRAIN_STALKER_ACTION = actions.FUNCTIONS.Train_Stalker_quick.id 
+
+# Terran Actions
+BUILD_SUPPLYDEPOT_ACTION = actions.FUNCTIONS.Build_SupplyDepot_screen.id
+BUILD_REFINERY_ACTION = actions.FUNCTIONS.Build_Refinery_screen.id
+BUILD_BARRACKS_ACTION = actions.FUNCTIONS.Build_Barracks_screen.id
+BUILD_TECHLAB_ACTION = actions.FUNCTIONS.Build_TechLab_quick.id
+TRAIN_SCV_ACTION = actions.FUNCTIONS.Train_SCV_quick.id
+TRAIN_MARAUDER_ACTION = actions.FUNCTIONS.Train_Marauder_quick.id 
+MOVE_CAMERA_ACTION = actions.FUNCTIONS.move_camera.id 
+
+# Common Actions
+HARVEST_ACTION = actions.FUNCTIONS.Harvest_Gather_screen.id 
+NO_OP = actions.FUNCTIONS.no_op()
+
+# --- RL 動作輸出定義 (AI 接手後使用) ---
+ACTION_DO_NOTHING = 0
+ACTION_BUILD_PROBE = 1
+ACTION_BUILD_PYLON = 2
+ACTION_BUILD_GATEWAY = 3
+ACTION_BUILD_ASSIMILATOR = 4
+ACTION_TRAIN_STALKER = 5
+ACTION_ATTACK = 6 
+
+# === 2. PPO 模型 (Actor-Critic) ===
+class ActorCritic(nn.Module):
+    def __init__(self, num_inputs, num_actions):
+        super(ActorCritic, self).__init__()
+        self.fc1 = nn.Linear(num_inputs, 64)
+        self.fc2 = nn.Linear(64, 128)
+        
+        self.actor = nn.Linear(128, num_actions)
+        self.critic = nn.Linear(128, 1)
+
+    def forward(self, x):
+        x = x.view(x.size(0), -1) # Flatten
+        if self.fc1.in_features != x.shape[1]:
+            self.fc1 = nn.Linear(x.shape[1], 64).to(DEVICE)
+            
+        x = F.relu(self.fc1(x))
+        x = F.relu(self.fc2(x))
+        return F.softmax(self.actor(x), dim=-1), self.critic(x)
+
+# === 3. 主角 Agent (腳本 + RL 混合體) ===
+class ProtossHybridAgent:
+    def __init__(self):
+        # --- RL 初始化 ---
+        self.model = ActorCritic(num_inputs=84*84, num_actions=7).to(DEVICE)
+        self.optimizer = optim.Adam(self.model.parameters(), lr=LR)
+        
+        # PPO Memory
+        self.memory_states = []
+        self.memory_actions = []
+        self.memory_logprobs = []
+        self.memory_rewards = [] 
+        self.memory_values = []
+        
+        # Epsilon 設定
+        self.epsilon = EPSILON_START
+        
+        # --- 腳本狀態初始化 ---
+        self.reset_game_variables()
+
+    def reset_game(self):
+        """每局遊戲開始時呼叫"""
+        self.reset_game_variables()
+        self.memory_states = []
+        self.memory_actions = []
+        self.memory_logprobs = []
+        self.memory_rewards = []
+        self.memory_values = []
+        
+        # 獎勵計算用的上一幀狀態
+        self.prev_stats = {
+            "my_stalker_hp": 0, "my_building_hp": 0,
+            "enemy_marauder_hp": 0, "enemy_building_hp": 0,
+            "enemy_marauder_count": 0 # 新增計數以便計算擊殺
+        }
+
+    def reset_game_variables(self):
+        """重置所有腳本邏輯相關變數"""
+        self.use_ai = False  # False = 腳本控制, True = AI 接手
+        
+        # 移植自 pvt_agent_basic 的變數
+        self.state = -1
+        self.pylon_target_a = None 
+        self.pylon_target_b = None
+        self.assimilator_target = None   
+        self.assimilator_target_2 = None 
+        self.gas_probes_assigned = 0     
+        self.selecting_probe = True      
+        self.recent_selected_coords = [] 
+        self.stalkers_trained = 0        
+        self.select_attempts = 0 
+        self.initial_mineral_coords = None
+        self.nexus_x_screen = 0
+        self.nexus_y_screen = 0
+        self.is_first_step = True
+
+    def update_epsilon(self):
+        """更新 Epsilon 值 (衰減)"""
+        if self.epsilon > EPSILON_END:
+            self.epsilon *= EPSILON_DECAY
+            if self.epsilon < EPSILON_END:
+                self.epsilon = EPSILON_END
+
+    def get_health_stats(self, obs):
+        """計算獎勵用的血量與數量統計"""
+        stats = { 
+            "my_stalker_hp": 0, "my_building_hp": 0, 
+            "enemy_marauder_hp": 0, "enemy_building_hp": 0,
+            "enemy_marauder_count": 0
+        }
+        if hasattr(obs.observation, 'raw_units'):
+            for unit in obs.observation.raw_units:
+                if unit.alliance == 1: # 我方
+                    if unit.unit_type == STALKER_ID:
+                        stats["my_stalker_hp"] += unit.health + unit.shield
+                    elif unit.unit_type in [NEXUS_ID, PYLON_ID, ASSIMILATOR_ID, GATEWAY_ID, CYBERNETICS_CORE_ID]: 
+                        stats["my_building_hp"] += unit.health + unit.shield
+                elif unit.alliance == 4: # 敵方
+                    if unit.unit_type == MARAUDER_ID: 
+                        stats["enemy_marauder_hp"] += unit.health
+                        stats["enemy_marauder_count"] += 1
+                    elif unit.unit_type in [COMMAND_CENTER_ID, SUPPLY_DEPOT_ID, REFINERY_ID, BARRACKS_ID]: 
+                        stats["enemy_building_hp"] += unit.health
+        return stats
+
+    def calculate_custom_reward(self, obs):
+        """
+        計算 PPO 獎勵 (血量 + 擊殺 + 全滅 + 時間懲罰)
+        """
+        current_stats = self.get_health_stats(obs)
+        reward = 0
+        
+        # 1. 基礎血量交換獎勵
+        if self.prev_stats["my_stalker_hp"] == 0 and self.prev_stats["enemy_marauder_hp"] == 0:
+            pass # 第一幀或雙方無兵
+        else:
+            # 我方受傷 (扣分)
+            diff_stalker = current_stats["my_stalker_hp"] - self.prev_stats["my_stalker_hp"]
+            if diff_stalker < 0: 
+                reward += diff_stalker * 0.01 # 係數可調
+            
+            # 敵方受傷 (加分)
+            diff_marauder = current_stats["enemy_marauder_hp"] - self.prev_stats["enemy_marauder_hp"]
+            if diff_marauder < 0: 
+                reward += abs(diff_marauder) * 0.03 # 攻擊敵人的獎勵係數高一點，鼓勵進攻
+            
+            # 建築物血量 (輔助)
+            diff_enemy_build = current_stats["enemy_building_hp"] - self.prev_stats["enemy_building_hp"]
+            if diff_enemy_build < 0: reward += abs(diff_enemy_build) * 0.01
+
+        # 2. 擊殺獎勵 (Kill Reward)
+        # 如果這一幀的敵人掠奪者數量 比 上一幀少，且上一幀不為0 -> 視為擊殺
+        if current_stats["enemy_marauder_count"] < self.prev_stats["enemy_marauder_count"]:
+            kills = self.prev_stats["enemy_marauder_count"] - current_stats["enemy_marauder_count"]
+            reward += (kills * REWARD_KILL)
+            # print(f"  >>> Kill! +{kills * REWARD_KILL}")
+
+        # 3. 全滅獎勵 (Wipeout Reward)
+        # 如果上一幀還有敵人，這一幀變成 0 -> 全滅
+        if self.prev_stats["enemy_marauder_count"] > 0 and current_stats["enemy_marauder_count"] == 0:
+            reward += REWARD_WIPEOUT
+            # print(f"  >>> WIPEOUT! +{REWARD_WIPEOUT}")
+
+        # 4. 時間懲罰 (Time Penalty)
+        reward += REWARD_TIME_PENALTY
+
+        # 更新狀態
+        self.prev_stats = current_stats
+        return reward
+
+    def preprocess(self, obs):
+        screen = obs.observation.feature_screen.unit_type
+        return torch.from_numpy(screen).float().unsqueeze(0).to(DEVICE)
+
+    def step(self, obs):
+        """主要決策入口"""
+        if self.use_ai:
+            return self.step_ai(obs)
+        else:
+            return self.step_script(obs)
+
+    # === AI 邏輯 (強化學習 + Epsilon Greedy) ===
+    def step_ai(self, obs):
+        state_tensor = self.preprocess(obs)
+        
+        # 取得模型預測
+        action_probs, state_value = self.model(state_tensor)
+        
+        # Epsilon-Greedy 邏輯
+        # 雖然 PPO 是 On-Policy，但加上 Epsilon 隨機探索有助於打破局部最優
+        if random.random() < self.epsilon:
+            # 隨機選擇動作
+            action_index = torch.tensor(random.randint(0, 6)).to(DEVICE)
+            # 為了能跑 PPO 更新，我們需要保留這個隨機動作在當下網路分佈中的 log_prob
+            dist = torch.distributions.Categorical(action_probs)
+            log_prob = dist.log_prob(action_index)
+        else:
+            # 依照機率分佈採樣 (標準 PPO)
+            dist = torch.distributions.Categorical(action_probs)
+            action_index = dist.sample()
+            log_prob = dist.log_prob(action_index)
+        
+        self.memory_states.append(state_tensor)
+        self.memory_actions.append(action_index)
+        self.memory_logprobs.append(log_prob)
+        self.memory_values.append(state_value)
+        
+        return self.execute_ai_action(action_index.item(), obs)
+
+    def execute_ai_action(self, action_cmd, obs):
+        minerals = obs.observation.player.minerals
+        unit_type = obs.observation.feature_screen.unit_type
+
+        def get_random_pos(unit_id):
+            y, x = (unit_type == unit_id).nonzero()
+            if x.any():
+                idx = random.randint(0, len(x)-1)
+                return (x[idx], y[idx])
+            return None
+
+        if action_cmd == ACTION_BUILD_PROBE:
+            if minerals >= 50 and TRAIN_PROBE_ACTION in obs.observation.available_actions:
+                return actions.FUNCTIONS.Train_Probe_quick("now")
+            pos = get_random_pos(NEXUS_ID)
+            if pos: return actions.FUNCTIONS.select_point("select", pos)
+            
+        elif action_cmd == ACTION_BUILD_PYLON:
+            if minerals >= 100 and BUILD_PYLON_ACTION in obs.observation.available_actions:
+                pos = get_random_pos(PROBE_ID)
+                if pos:
+                    tx = int(np.clip(pos[0] + random.randint(-5, 5), 0, 83))
+                    ty = int(np.clip(pos[1] + random.randint(-5, 5), 0, 83))
+                    return actions.FUNCTIONS.Build_Pylon_screen("now", (tx, ty))
+            pos = get_random_pos(PROBE_ID)
+            if pos: return actions.FUNCTIONS.select_point("select", pos)
+
+        elif action_cmd == ACTION_TRAIN_STALKER:
+            if minerals >= 125 and TRAIN_STALKER_ACTION in obs.observation.available_actions:
+                return actions.FUNCTIONS.Train_Stalker_quick("now")
+            pos = get_random_pos(GATEWAY_ID)
+            if pos: return actions.FUNCTIONS.select_point("select", pos)
+            
+        elif action_cmd == ACTION_ATTACK:
+            if actions.FUNCTIONS.select_army.id in obs.observation.available_actions:
+                 return actions.FUNCTIONS.select_army("select")
+            if actions.FUNCTIONS.Attack_minimap.id in obs.observation.available_actions:
+                 # 往地圖對角攻擊
+                 target = (45, 45) 
+                 return actions.FUNCTIONS.Attack_minimap("now", target) 
+        
+        return NO_OP
+
+    # === 腳本邏輯 (保持原樣，僅變數引用) ===
+    def step_script(self, obs):
+        unit_type_screen = obs.observation.feature_screen[features.SCREEN_FEATURES.unit_type.index]
+        current_supply_cap = obs.observation.player.food_cap
+        current_minerals = obs.observation.player.minerals
+        current_vespene = obs.observation.player.vespene
+        current_workers = obs.observation.player.food_workers
+        
+        # --- 輔助函式 ---
+        def unit_exists(unit_id):
+            y_coords, x_coords = (unit_type_screen == unit_id).nonzero()
+            return x_coords.any()
+
+        def count_units(unit_id):
+            return np.sum((unit_type_screen == unit_id).astype(int))
+
+        def get_select_nexus_action():
+            y_coords, x_coords = (unit_type_screen == NEXUS_ID).nonzero()
+            if x_coords.any():
+                target_x = int(x_coords.mean())
+                target_y = int(y_coords.mean())
+                self.nexus_x_screen = target_x
+                self.nexus_y_screen = target_y
+                x_start = max(0, target_x - 5)
+                y_start = max(0, target_y - 5)
+                x_end = min(83, target_x + 5)
+                y_end = min(83, target_y + 5)
+                return actions.FUNCTIONS.select_rect("select", (x_start, y_start), (x_end, y_end))
+            return NO_OP
+
+        def get_select_probe_action(select_type="select"):
+            y_coords, x_coords = (unit_type_screen == PROBE_ID).nonzero() 
+            if x_coords.any():
+                target_x, target_y = x_coords[0], y_coords[0] 
+                return actions.FUNCTIONS.select_point(select_type, (target_x, target_y))
+            return NO_OP
+
+        def get_select_gateway_action():
+            y_coords, x_coords = (unit_type_screen == GATEWAY_ID).nonzero()
+            if x_coords.any():
+                target_x = int(x_coords.mean())
+                target_y = int(y_coords.mean())
+                return actions.FUNCTIONS.select_point("select", (target_x, target_y))
+            return NO_OP
+
+        # --- 初始化 ---
+        if self.is_first_step:
+            self.is_first_step = False
+            mineral_coords = (unit_type_screen == MINERAL_FIELD_ID).nonzero()
+            if mineral_coords[0].any():
+                self.initial_mineral_coords = (mineral_coords[1][0], mineral_coords[0][0])
+            nexus_coords = (unit_type_screen == NEXUS_ID).nonzero()
+            if nexus_coords[0].any():
+                self.nexus_x_screen = nexus_coords[1].mean().astype(int)
+                self.nexus_y_screen = nexus_coords[0].mean().astype(int)
+
+        # --- 狀態機 ---
+        if self.state == -1:
+            if HARVEST_ACTION in obs.observation.available_actions and self.initial_mineral_coords:
+                self.state = 0
+                return actions.FUNCTIONS.Harvest_Gather_screen("now", self.initial_mineral_coords)
+            else:
+                return get_select_probe_action("select_all_type")
+
+        elif self.state == 0:
+            if current_workers < PROBE_TARGET:
+                if TRAIN_PROBE_ACTION in obs.observation.available_actions:
+                    if current_minerals >= 50:
+                        return actions.FUNCTIONS.Train_Probe_quick("now")
+                elif current_minerals >= 50:
+                    return get_select_nexus_action()
+            
+            elif current_workers >= PROBE_TARGET and current_minerals >= 100:
+                if self.nexus_x_screen != 0: 
+                    min_y_all, min_x_all = (unit_type_screen == MINERAL_FIELD_ID).nonzero()
+                    if min_x_all.any():
+                        mineral_mean_x = min_x_all.mean()
+                        mineral_mean_y = min_y_all.mean()
+                    else:
+                        mineral_mean_x, mineral_mean_y = self.initial_mineral_coords
+                    
+                    diff_x = self.nexus_x_screen - mineral_mean_x
+                    diff_y = self.nexus_y_screen - mineral_mean_y
+                    
+                    offset_x = 20 if diff_x > 0 else -20
+                    offset_y = 20 if diff_y > 0 else -20
+                    
+                    self.pylon_target_a = (
+                        np.clip(self.nexus_x_screen + offset_x, 0, 83).astype(int),
+                        np.clip(self.nexus_y_screen + offset_y, 0, 83).astype(int)
+                    )
+                    self.pylon_target_b = (
+                        np.clip(self.nexus_x_screen + offset_x * 0.5, 0, 83).astype(int),
+                        np.clip(self.nexus_y_screen + offset_y * 1.5, 0, 83).astype(int)
+                    )
+                    self.state = 1
+                    print(f"[腳本] 準備建造 Pylon A: {self.pylon_target_a}")
+                else:
+                    return get_select_nexus_action()
+
+        elif self.state == 1:
+            if BUILD_PYLON_ACTION in obs.observation.available_actions:
+                self.state = 1.1
+                self.select_attempts = 0
+                return actions.FUNCTIONS.Build_Pylon_screen("now", self.pylon_target_a)
+            else:
+                return get_select_probe_action()
+
+        elif self.state == 1.1:
+            if current_supply_cap >= 21:
+                self.state = 1.2
+                self.select_attempts = 0
+                return NO_OP
+            self.select_attempts += 1
+            if self.select_attempts > 20: self.state = 1; return NO_OP
+
+        elif self.state == 1.2:
+            if BUILD_PYLON_ACTION in obs.observation.available_actions:
+                if current_minerals >= 100:
+                    self.state = 1.3
+                    self.select_attempts = 0
+                    return actions.FUNCTIONS.Build_Pylon_screen("now", self.pylon_target_b)
+            else:
+                return get_select_probe_action()
+
+        elif self.state == 1.3:
+            if current_supply_cap >= 31:
+                self.state = 2
+                print(f"[腳本] Pylon B 完成，準備建造瓦斯 1")
+                self.select_attempts = 0
+                return NO_OP
+            self.select_attempts += 1
+            if self.select_attempts > 30:
+                self.state = 1.2
+                new_offset_x = -20 if (self.nexus_x_screen - self.pylon_target_b[0]) > 0 else 20
+                self.pylon_target_b = (np.clip(self.nexus_x_screen + new_offset_x, 0, 83).astype(int), self.pylon_target_b[1])
+                return NO_OP
+
+        elif self.state == 2:
+            if BUILD_ASSIMILATOR_ACTION in obs.observation.available_actions:
+                if current_minerals >= 75:
+                    if self.assimilator_target is None:
+                        y_geo, x_geo = (unit_type_screen == GEYSER_ID).nonzero()
+                        if x_geo.any():
+                             first_x, first_y = x_geo[0], y_geo[0]
+                             mask = (np.abs(x_geo - first_x) < 10) & (np.abs(y_geo - first_y) < 10)
+                             target_x = int(x_geo[mask].mean())
+                             target_y = int(y_geo[mask].mean())
+                             self.assimilator_target = (target_x, target_y)
+                        else:
+                             return NO_OP 
+                    self.state = 2.1
+                    self.select_attempts = 0
+                    return actions.FUNCTIONS.Build_Assimilator_screen("now", self.assimilator_target)
+            else:
+                return get_select_probe_action()
+        
+        elif self.state == 2.1:
+            if count_units(ASSIMILATOR_ID) >= 1:
+                self.state = 3
+                self.gas_probes_assigned = 0
+                self.selecting_probe = True
+                self.recent_selected_coords = []
+                print(f"[腳本] 瓦斯 1 完成，指派採集")
+                return NO_OP
+            self.select_attempts += 1
+            if self.select_attempts > 20: self.state = 2; self.assimilator_target = None; return NO_OP
+
+        elif self.state == 3:
+            if self.gas_probes_assigned < 3:
+                if self.selecting_probe:
+                    y_coords, x_coords = (unit_type_screen == PROBE_ID).nonzero() 
+                    if x_coords.any():
+                        distances = np.sqrt((x_coords - self.assimilator_target[0])**2 + (y_coords - self.assimilator_target[1])**2)
+                        mask = distances > 15
+                        for past_x, past_y in self.recent_selected_coords:
+                            dist_from_past = np.sqrt((x_coords - past_x)**2 + (y_coords - past_y)**2)
+                            mask = mask & (dist_from_past > 8)
+                        
+                        if mask.any():
+                            valid_x = x_coords[mask]
+                            valid_y = y_coords[mask]
+                            idx = random.randint(0, len(valid_x) - 1)
+                            target_x, target_y = valid_x[idx], valid_y[idx]
+                        else:
+                            idx = random.randint(0, len(x_coords) - 1)
+                            target_x, target_y = x_coords[idx], y_coords[idx]
+                        
+                        self.recent_selected_coords.append((target_x, target_y))
+                        self.selecting_probe = False 
+                        return actions.FUNCTIONS.select_point("select", (target_x, target_y))
+                    return NO_OP
+                else:
+                    if HARVEST_ACTION in obs.observation.available_actions:
+                        self.gas_probes_assigned += 1
+                        self.selecting_probe = True 
+                        return actions.FUNCTIONS.Harvest_Gather_screen("now", self.assimilator_target)
+                    else:
+                        self.selecting_probe = True
+                        return NO_OP
+            else:
+                self.state = 4
+                self.select_attempts = 0
+                self.recent_selected_coords = []
+                print(f"[腳本] 瓦斯 1 指派完成，準備建造瓦斯 2")
+                return NO_OP
+
+        elif self.state == 4:
+            if BUILD_ASSIMILATOR_ACTION in obs.observation.available_actions:
+                if current_minerals >= 75:
+                    if self.assimilator_target_2 is None:
+                        y_geo, x_geo = (unit_type_screen == GEYSER_ID).nonzero()
+                        if x_geo.any():
+                            first_tx, first_ty = self.assimilator_target
+                            distances = np.sqrt((x_geo - first_tx)**2 + (y_geo - first_ty)**2)
+                            mask = distances > 15
+                            if mask.any():
+                                target_x = int(x_geo[mask].mean())
+                                target_y = int(y_geo[mask].mean())
+                                self.assimilator_target_2 = (target_x, target_y)
+                            else:
+                                return NO_OP
+                        else:
+                            return NO_OP
+                    self.state = 4.1
+                    self.select_attempts = 0
+                    return actions.FUNCTIONS.Build_Assimilator_screen("now", self.assimilator_target_2)
+            else:
+                return get_select_probe_action()
+
+        elif self.state == 4.1:
+            if count_units(ASSIMILATOR_ID) >= 2:
+                self.state = 5
+                self.gas_probes_assigned = 0
+                self.selecting_probe = True
+                self.recent_selected_coords = []
+                print(f"[腳本] 瓦斯 2 完成，指派採集")
+                return NO_OP
+            self.select_attempts += 1
+            if self.select_attempts > 20: self.state = 4; self.assimilator_target_2 = None; return NO_OP
+
+        elif self.state == 5:
+            if self.gas_probes_assigned < 3:
+                if self.selecting_probe:
+                    y_coords, x_coords = (unit_type_screen == PROBE_ID).nonzero() 
+                    if x_coords.any():
+                        dist1 = np.sqrt((x_coords - self.assimilator_target[0])**2 + (y_coords - self.assimilator_target[1])**2)
+                        dist2 = np.sqrt((x_coords - self.assimilator_target_2[0])**2 + (y_coords - self.assimilator_target_2[1])**2)
+                        mask = (dist1 > 15) & (dist2 > 15)
+                        for past_x, past_y in self.recent_selected_coords:
+                            dist_from_past = np.sqrt((x_coords - past_x)**2 + (y_coords - past_y)**2)
+                            mask = mask & (dist_from_past > 8)
+                        
+                        if mask.any():
+                            valid_x = x_coords[mask]
+                            valid_y = y_coords[mask]
+                            idx = random.randint(0, len(valid_x) - 1)
+                            target_x, target_y = valid_x[idx], valid_y[idx]
+                        else:
+                            idx = random.randint(0, len(x_coords) - 1)
+                            target_x, target_y = x_coords[idx], y_coords[idx]
+
+                        self.recent_selected_coords.append((target_x, target_y))
+                        self.selecting_probe = False 
+                        return actions.FUNCTIONS.select_point("select", (target_x, target_y))
+                    return NO_OP
+                else:
+                    if HARVEST_ACTION in obs.observation.available_actions:
+                        self.gas_probes_assigned += 1
+                        self.selecting_probe = True 
+                        return actions.FUNCTIONS.Harvest_Gather_screen("now", self.assimilator_target_2)
+                    else:
+                        self.selecting_probe = True
+                        return NO_OP
+            else:
+                self.state = 6 
+                print(f"[腳本] 瓦斯 2 指派完成，準備建造 Gateway")
+                return NO_OP
+
+        elif self.state == 6:
+            if BUILD_GATEWAY_ACTION in obs.observation.available_actions:
+                if current_minerals >= 150:
+                    if self.pylon_target_a:
+                        px, py = self.pylon_target_a
+                        offset_gateway_y = 12 if py < 42 else -12
+                        target_x = np.clip(px, 0, 83) 
+                        target_y = np.clip(py + offset_gateway_y, 0, 83)
+                        target = (target_x, target_y)
+                        self.state = 6.05
+                        self.select_attempts = 0
+                        return actions.FUNCTIONS.Build_Gateway_screen("now", target)
+            else:
+                 return get_select_probe_action()
+        
+        elif self.state == 6.05:
+            if HARVEST_ACTION in obs.observation.available_actions and self.assimilator_target:
+                self.state = 6.1
+                return actions.FUNCTIONS.Harvest_Gather_screen("queued", self.assimilator_target)
+            self.state = 6.1
+            return NO_OP
+
+        elif self.state == 6.1:
+             if count_units(GATEWAY_ID) > 0:
+                 self.state = 7
+                 print(f"[腳本] Gateway 建造中")
+                 return NO_OP
+             self.select_attempts += 1
+             if self.select_attempts > 20: self.state = 6; return NO_OP
+
+        elif self.state == 7:
+            if BUILD_CYBERNETICS_CORE_ACTION in obs.observation.available_actions:
+                if current_minerals >= 150:
+                    if self.pylon_target_a:
+                        px, py = self.pylon_target_a
+                        offset_cyber_x = 12 if px < 42 else -12
+                        target_x = np.clip(px + offset_cyber_x, 0, 83)
+                        target_y = np.clip(py, 0, 83) 
+                        target = (target_x, target_y)
+                        self.state = 7.05
+                        self.select_attempts = 0
+                        return actions.FUNCTIONS.Build_CyberneticsCore_screen("now", target)
+            else:
+                return get_select_probe_action()
+
+        elif self.state == 7.05:
+            if HARVEST_ACTION in obs.observation.available_actions and self.assimilator_target:
+                self.state = 7.1
+                return actions.FUNCTIONS.Harvest_Gather_screen("queued", self.assimilator_target)
+            self.state = 7.1
+            return NO_OP
+
+        elif self.state == 7.1:
+            if count_units(CYBERNETICS_CORE_ID) > 0:
+                 self.state = 8
+                 self.stalkers_trained = 0
+                 print(f"[腳本] Cyber Core 建造中，準備生產追獵者")
+                 return NO_OP
+            self.select_attempts += 1
+            if self.select_attempts > 80: self.state = 7; return NO_OP
+
+        elif self.state == 8:
+            if self.stalkers_trained < 5:
+                if TRAIN_STALKER_ACTION in obs.observation.available_actions:
+                    if current_minerals >= 125 and current_vespene >= 50:
+                        if current_supply_cap - current_workers - self.stalkers_trained * 2 >= 2: 
+                             self.stalkers_trained += 1
+                             print(f"[腳本] 訓練追獵者 {self.stalkers_trained}/5")
+                             return actions.FUNCTIONS.Train_Stalker_quick("now")
+                    return NO_OP
+                else:
+                    return get_select_gateway_action()
+            else:
+                self.state = 9
+                print(f"[腳本] 5 隻追獵者訓練完成，切換至 AI 控制")
+                return NO_OP
+
+        elif self.state == 9:
+            # === 切換點：從腳本切換到 RL AI ===
+            self.use_ai = True
+            print("====================================")
+            print("   Script Finished -> AI Taking Over")
+            print("====================================")
+            return NO_OP
+
+        return NO_OP
+
+# === 4. 對手 (Terran Bot - 移植自 pvt_agent_basic.py) ===
+class TerranBot:
+    """會造兵營和掠奪者的聰明對手"""
+    def __init__(self):
+        self.state = -1
+        self.supply_depot_target = None
+        self.refinery_target = None
+        self.barracks_target = None
+        self.gas_workers_assigned = 0
+        self.marauders_trained = 0     
+        self.selecting_worker = True
+        self.recent_selected_coords = []
+        self.busy_depot_locations = [] 
+        self.depots_built = 0          
+        self.last_depot_pixels = 0     
+        self.select_attempts = 0
+        self.initial_mineral_coords = None
+        self.first_depot_coords = None 
+        self.build_dir = (1, 1)        
+        self.base_minimap_coords = None 
+        self.cc_x_screen = 0
+        self.cc_y_screen = 0
+        self.camera_centered = False   
+        self.is_first_step = True
+
+    def step(self, obs):
+        unit_type_screen = obs.observation.feature_screen[features.SCREEN_FEATURES.unit_type.index]
+        current_minerals = obs.observation.player.minerals
+        current_vespene = obs.observation.player.vespene
+        current_workers = obs.observation.player.food_workers
+        current_supply_cap = obs.observation.player.food_cap
+
+        def count_units(unit_id):
+            return np.sum((unit_type_screen == unit_id).astype(int))
+
+        def get_select_cc_action():
+            y_coords, x_coords = (unit_type_screen == COMMAND_CENTER_ID).nonzero()
+            if x_coords.any():
+                target_x = int(x_coords.mean())
+                target_y = int(y_coords.mean())
+                self.cc_x_screen = target_x
+                self.cc_y_screen = target_y
+                return actions.FUNCTIONS.select_point("select", (target_x, target_y))
+            return NO_OP
+
+        def get_select_scv_action(select_type="select"):
+            y_coords, x_coords = (unit_type_screen == SCV_ID).nonzero()
+            if x_coords.any():
+                mask = np.ones(len(x_coords), dtype=bool) 
+                for busy_x, busy_y in self.busy_depot_locations:
+                    dist_busy = np.sqrt((x_coords - busy_x)**2 + (y_coords - busy_y)**2)
+                    mask = mask & (dist_busy > 10)
+                if self.supply_depot_target:
+                    dist_target = np.sqrt((x_coords - self.supply_depot_target[0])**2 + (y_coords - self.supply_depot_target[1])**2)
+                    mask = mask & (dist_target > 10)
+                if self.refinery_target:
+                    dist_gas = np.sqrt((x_coords - self.refinery_target[0])**2 + (y_coords - self.refinery_target[1])**2)
+                    mask = mask & (dist_gas > 15) 
+
+                if mask.any():
+                    valid_indices = np.where(mask)[0]
+                    idx = random.choice(valid_indices)
+                    target_x, target_y = int(x_coords[idx]), int(y_coords[idx])
+                    return actions.FUNCTIONS.select_point(select_type, (target_x, target_y))
+                
+                idx = random.randint(0, len(x_coords) - 1)
+                target_x, target_y = int(x_coords[idx]), int(y_coords[idx]) 
+                return actions.FUNCTIONS.select_point(select_type, (target_x, target_y))
+            return NO_OP
+        
+        def get_select_barracks_action():
+            y_coords, x_coords = (unit_type_screen == BARRACKS_ID).nonzero()
+            if x_coords.any():
+                target_x = int(x_coords.mean())
+                target_y = int(y_coords.mean())
+                return actions.FUNCTIONS.select_point("select", (target_x, target_y))
+            return NO_OP
+
+        if self.is_first_step:
+            self.is_first_step = False
+            mineral_coords = (unit_type_screen == MINERAL_FIELD_ID).nonzero()
+            if mineral_coords[0].any():
+                self.initial_mineral_coords = (mineral_coords[1][0], mineral_coords[0][0])
+            cc_coords = (unit_type_screen == COMMAND_CENTER_ID).nonzero()
+            if cc_coords[0].any():
+                self.cc_x_screen = int(cc_coords[1].mean())
+                self.cc_y_screen = int(cc_coords[0].mean())
+            player_relative = obs.observation.feature_minimap[features.MINIMAP_FEATURES.player_relative.index]
+            y_mini, x_mini = (player_relative == features.PlayerRelative.SELF).nonzero()
+            if x_mini.any():
+                self.base_minimap_coords = (int(x_mini.mean()), int(y_mini.mean()))
+            self.last_depot_pixels = count_units(SUPPLY_DEPOT_ID)
+
+        if self.state == -1:
+            if HARVEST_ACTION in obs.observation.available_actions and self.initial_mineral_coords:
+                self.state = 0
+                return actions.FUNCTIONS.Harvest_Gather_screen("now", self.initial_mineral_coords)
+            else:
+                return get_select_scv_action("select_all_type")
+
+        elif self.state == 0:
+            if current_workers < 15:
+                if TRAIN_SCV_ACTION in obs.observation.available_actions:
+                    if current_minerals >= 50:
+                        return actions.FUNCTIONS.Train_SCV_quick("now")
+                elif current_minerals >= 50:
+                    return get_select_cc_action()
+            elif current_minerals >= 100:
+                self.state = 1
+                offset_x = 15 if self.initial_mineral_coords[0] < self.cc_x_screen else -15
+                offset_y = 15 if self.initial_mineral_coords[1] < self.cc_y_screen else -15
+                self.supply_depot_target = (np.clip(self.cc_x_screen + offset_x, 0, 83).astype(int), np.clip(self.cc_y_screen + offset_y, 0, 83).astype(int))
+                self.first_depot_coords = self.supply_depot_target
+                dir_x = 1 if offset_x > 0 else -1
+                dir_y = 1 if offset_y > 0 else -1
+                self.build_dir = (dir_x, dir_y)
+                return get_select_scv_action()
+            return NO_OP
+
+        elif self.state == 1:
+            if BUILD_SUPPLYDEPOT_ACTION in obs.observation.available_actions:
+                if current_minerals >= 100:
+                    self.state = 1.1
+                    self.select_attempts = 0 
+                    return actions.FUNCTIONS.Build_SupplyDepot_screen("now", self.supply_depot_target)
+            else:
+                if current_minerals >= 100: return get_select_scv_action()
+                return NO_OP
+
+        elif self.state == 1.1:
+            current_pixels = count_units(SUPPLY_DEPOT_ID)
+            if current_pixels > self.last_depot_pixels + 5: 
+                self.depots_built += 1
+                self.last_depot_pixels = current_pixels
+                self.busy_depot_locations.append(self.supply_depot_target)
+                if self.depots_built < 3:
+                    dir_x, dir_y = self.build_dir
+                    base_x, base_y = self.first_depot_coords
+                    if self.depots_built == 1:
+                        next_x, next_y = base_x + (12 * dir_x), base_y
+                    else:
+                        next_x, next_y = base_x + (6 * dir_x), base_y + (12 * dir_y)
+                    self.supply_depot_target = (np.clip(next_x, 0, 83).astype(int), np.clip(next_y, 0, 83).astype(int))
+                    self.state = 1
+                    return get_select_scv_action() 
+                else:
+                    self.state = 2
+                    return NO_OP
+            self.select_attempts += 1
+            if self.select_attempts > 100:
+                old_x, old_y = self.supply_depot_target
+                self.supply_depot_target = (np.clip(old_x + random.randint(-15, 15), 0, 83), np.clip(old_y + random.randint(-15, 15), 0, 83))
+                self.state = 1 
+                return get_select_scv_action()
+            return NO_OP
+
+        elif self.state == 2:
+            if BUILD_REFINERY_ACTION in obs.observation.available_actions:
+                if current_minerals >= 75:
+                    if self.refinery_target is None:
+                        y_geo, x_geo = (unit_type_screen == GEYSER_ID).nonzero()
+                        if x_geo.any():
+                             first_x, first_y = x_geo[0], y_geo[0]
+                             mask = (np.abs(x_geo - first_x) < 10) & (np.abs(y_geo - first_y) < 10)
+                             target_x = int(x_geo[mask].mean())
+                             target_y = int(y_geo[mask].mean())
+                             self.refinery_target = (target_x, target_y)
+                        else:
+                             return NO_OP
+                    self.state = 2.1
+                    return actions.FUNCTIONS.Build_Refinery_screen("now", self.refinery_target)
+            else:
+                return get_select_scv_action()
+
+        elif self.state == 2.1:
+            if count_units(REFINERY_ID) > 0:
+                self.state = 3
+                self.gas_workers_assigned = 0
+                self.selecting_worker = True
+                self.recent_selected_coords = []
+                return NO_OP
+            return NO_OP
+
+        elif self.state == 3:
+            if self.gas_workers_assigned < 3:
+                if self.selecting_worker:
+                    y_coords, x_coords = (unit_type_screen == SCV_ID).nonzero()
+                    if x_coords.any():
+                        distances = np.sqrt((x_coords - self.refinery_target[0])**2 + (y_coords - self.refinery_target[1])**2)
+                        mask = distances > 15 
+                        for past_x, past_y in self.recent_selected_coords:
+                            dist_from_past = np.sqrt((x_coords - past_x)**2 + (y_coords - past_y)**2)
+                            mask = mask & (dist_from_past > 5)
+                        if mask.any():
+                            valid_x = x_coords[mask]
+                            valid_y = y_coords[mask]
+                            idx = random.randint(0, len(valid_x) - 1)
+                            target_x, target_y = int(valid_x[idx]), int(valid_y[idx])
+                            self.recent_selected_coords.append((target_x, target_y))
+                            self.selecting_worker = False
+                            return actions.FUNCTIONS.select_point("select", (target_x, target_y))
+                        idx = random.randint(0, len(x_coords) - 1)
+                        target_x, target_y = int(x_coords[idx]), int(y_coords[idx])
+                        self.recent_selected_coords.append((target_x, target_y))
+                        self.selecting_worker = False
+                        return actions.FUNCTIONS.select_point("select", (target_x, target_y))
+                    return NO_OP
+                else:
+                    if HARVEST_ACTION in obs.observation.available_actions:
+                        self.gas_workers_assigned += 1
+                        self.selecting_worker = True
+                        return actions.FUNCTIONS.Harvest_Gather_screen("now", self.refinery_target)
+                    else:
+                        self.selecting_worker = True
+                        return NO_OP
+            else:
+                self.state = 4
+                return NO_OP
+        
+        elif self.state == 4:
+            if self.base_minimap_coords is None:
+                player_relative = obs.observation.feature_minimap[features.MINIMAP_FEATURES.player_relative.index]
+                y_mini, x_mini = (player_relative == features.PlayerRelative.SELF).nonzero()
+                if x_mini.any():
+                    self.base_minimap_coords = (int(x_mini.mean()), int(y_mini.mean()))
+                else:
+                    self.base_minimap_coords = (15, 15)
+
+            if not self.camera_centered:
+                target_x, target_y = self.base_minimap_coords
+                self.camera_centered = True
+                return actions.FUNCTIONS.move_camera((target_x, target_y))
+            
+            if BUILD_BARRACKS_ACTION in obs.observation.available_actions:
+                if current_minerals >= 150:
+                    if self.barracks_target is None:
+                        minimap_x = self.base_minimap_coords[0]
+                        offset_x = 30 
+                        offset_y = 0
+                        if minimap_x > 32:
+                            offset_x = -30
+                        rand_off_x = random.randint(-5, 5)
+                        rand_off_y = random.randint(-5, 5)
+                        self.barracks_target = (np.clip(42 + offset_x + rand_off_x, 0, 83).astype(int), np.clip(42 + offset_y + rand_off_y, 0, 83).astype(int))
+
+                    self.state = 4.1
+                    self.select_attempts = 0
+                    return actions.FUNCTIONS.Build_Barracks_screen("now", self.barracks_target)
+            else:
+                return get_select_scv_action()
+
+        elif self.state == 4.1:
+             if count_units(BARRACKS_ID) > 0:
+                 self.state = 5
+                 return NO_OP
+             self.select_attempts += 1
+             if self.select_attempts > 100: self.state = 4; self.barracks_target = None; return NO_OP
+             return NO_OP
+
+        elif self.state == 5:
+            if count_units(BARRACKS_TECHLAB_ID) > 0:
+                self.state = 7 
+                return NO_OP
+            if BUILD_TECHLAB_ACTION in obs.observation.available_actions:
+                if current_minerals >= 50 and current_vespene >= 25:
+                    self.state = 6 
+                    return actions.FUNCTIONS.Build_TechLab_quick("now")
+            else:
+                return get_select_barracks_action()
+            return NO_OP
+
+        elif self.state == 6:
+            if count_units(BARRACKS_TECHLAB_ID) > 0:
+                self.state = 7
+                return NO_OP
+            return NO_OP
+
+        elif self.state == 7:
+            if self.marauders_trained < 5:
+                if TRAIN_MARAUDER_ACTION in obs.observation.available_actions:
+                    if current_minerals >= 100 and current_vespene >= 25:
+                        if current_supply_cap - current_workers - self.marauders_trained * 2 >= 2:
+                            self.marauders_trained += 1
+                            return actions.FUNCTIONS.Train_Marauder_quick("now")
+                    return NO_OP
+                else:
+                    return get_select_barracks_action()
+            else:
+                self.state = 8
+                return NO_OP
+
+        elif self.state == 8:
+            return NO_OP
+        return NO_OP
+
+# === 5. PPO 更新與訓練循環 ===
+def update_ppo(agent):
+    # --- 1. 初始化與長度對齊 ---
+    # 確保所有 Memory 列表長度一致，避免索引出錯
+    min_len = min(len(agent.memory_states), len(agent.memory_actions), 
+                  len(agent.memory_logprobs), len(agent.memory_rewards), len(agent.memory_values))
+    
+    if min_len < 10: # 樣本數太少時不更新
+        return 0.0
+
+    # --- 2. 安全處理動作數據 (維度統一為 [1]) ---
+    actions_list = []
+    for a in agent.memory_actions[:min_len]:
+        if torch.is_tensor(a):
+            actions_list.append(a.unsqueeze(0) if a.dim() == 0 else a.view(-1))
+        elif isinstance(a, (list, np.ndarray, int, float)):
+            tmp_a = torch.tensor(a, dtype=torch.float32)
+            actions_list.append(torch.tensor([0.0]) if tmp_a.numel() == 0 else tmp_a.view(-1))
+        else:
+            actions_list.append(torch.tensor([0.0]))
+    
+    # 強制截斷，只取第一個元素，確保最終 stack 出來形狀是 (min_len, 1)
+    final_actions = torch.stack([a[0:1] for a in actions_list]).to(DEVICE).detach()
+
+    # --- 3. 準備 Tensor 數據 ---
+    old_states = torch.stack(agent.memory_states[:min_len]).to(DEVICE).detach()
+    old_logprobs = torch.stack(agent.memory_logprobs[:min_len]).to(DEVICE).detach()
+    old_values = torch.stack(agent.memory_values[:min_len]).to(DEVICE).detach()
+    
+    # --- 4. 計算折扣回報 (Rewards-to-go) 與 優勢 (Advantages) ---
+    rewards = []
+    discounted_reward = 0
+    for r in reversed(agent.memory_rewards[:min_len]):
+        discounted_reward = r + (GAMMA * discounted_reward)
+        rewards.insert(0, discounted_reward)
+    
+    rewards = torch.tensor(rewards, dtype=torch.float32).to(DEVICE).unsqueeze(1)
+    # 優勢函數簡化版: Returns - Baseline(Values)
+    advantages = rewards - old_values.detach()
+    # 正規化優勢有助於訓練穩定
+    advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-7)
+
+    # --- 5. PPO 核心優化循環 (K個 Epoch) ---
+    loss_value = 0
+    K_EPOCHS = 4 
+    EPS_CLIP = 0.2
+    
+    for _ in range(K_EPOCHS):
+        # 取得當前模型對舊狀態的預測
+        action_probs, state_values = agent.model(old_states)
+        dist = torch.distributions.Categorical(action_probs)
+        new_logprobs = dist.log_prob(final_actions.squeeze())
+        dist_entropy = dist.entropy()
+        
+        # 計算機率比 (Ratio): exp(new - old)
+        ratios = torch.exp(new_logprobs.unsqueeze(1) - old_logprobs.detach())
+
+        # PPO Surrogate Loss (Clipped)
+        surr1 = ratios * advantages
+        surr2 = torch.clamp(ratios, 1 - EPS_CLIP, 1 + EPS_CLIP) * advantages
+        
+        # 總損失 = Actor損失 + Critic損失(MSE) - 熵獎勵(鼓勵探索)
+        # 這裡係數常用 0.5(Critic) 與 0.01(Entropy)
+        loss = -torch.min(surr1, surr2).mean() + \
+               0.5 * F.mse_loss(state_values, rewards) - \
+               0.01 * dist_entropy.mean()
+
+        # 反向傳播與參數更新
+        agent.optimizer.zero_grad()
+        loss.backward()
+        agent.optimizer.step()
+        
+        loss_value += loss.item()
+
+    # --- 6. 清理記憶體並回傳 (修復 NoneType 報錯) ---
+    agent.memory_states = []
+    agent.memory_actions = []
+    agent.memory_logprobs = []
+    agent.memory_rewards = []
+    agent.memory_values = []
+    
+    return loss_value / K_EPOCHS
+def save_model(agent, log_dir, episode):
+    """保存模型，並維護 max_to_keep"""
+    filename = os.path.join(log_dir, f"hybrid_model_ep{episode}.pth")
+    torch.save(agent.model.state_dict(), filename)
+    print(f"Model saved: {filename}")
+    
+    # 清理舊模型 (Max to keep)
+    files = sorted(glob.glob(os.path.join(log_dir, "hybrid_model_ep*.pth")), key=os.path.getmtime)
+    if len(files) > MAX_TO_KEEP:
+        for f in files[:-MAX_TO_KEEP]:
+            os.remove(f)
+            print(f"Removed old model: {f}")
+
+def main(argv):
+    print("=== SC2 Hybrid Agent v8.0 (5v5 Kill Reward + Epsilon + Saving) ===")
+    current_time_str = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M_HybridV8")
+    log_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs", current_time_str)
+    if not os.path.exists(log_dir):
+        os.makedirs(log_dir)
+    writer = SummaryWriter(log_dir)
+
+    bot_hybrid = ProtossHybridAgent()
+    
+    last_save_time = time.time()
+    
+    try:
+        with sc2_env.SC2Env(
+            map_name="Simple64",
+            players=[sc2_env.Agent(sc2_env.Race.protoss), sc2_env.Agent(sc2_env.Race.terran)],
+            agent_interface_format=sc2_env.AgentInterfaceFormat(
+                feature_dimensions=sc2_env.Dimensions(screen=84, minimap=64),
+                use_raw_units=True, 
+            ),
+            step_mul=8,
+            game_steps_per_episode=10000, 
+            visualize=True
+        ) as env:
+            for episode in range(TOTAL_EPISODES):
+                obs_list = env.reset()
+                bot_hybrid.reset_game()
+                
+                bot_opponent = TerranBot() 
+                bot_opponent.step(obs_list[1]) 
+
+                total_reward = 0
+                step_count = 0
+                
+                while True:
+                    step_count += 1
+                    try:
+                        action_p = bot_hybrid.step(obs_list[0])
+                        action_t = bot_opponent.step(obs_list[1])
+                        obs_list = env.step([action_p, action_t])
+                    except Exception as e:
+                        print(f"Game Loop Error: {e}")
+                        traceback.print_exc()
+                        break 
+
+                    if bot_hybrid.use_ai:
+                        env_reward = obs_list[0].reward
+                        hp_reward = bot_hybrid.calculate_custom_reward(obs_list[0])
+                        final_step_reward = env_reward + hp_reward
+                        bot_hybrid.memory_rewards.append(final_step_reward)
+                        total_reward += final_step_reward
+                    
+                    if obs_list[0].last():
+                        break
+                
+                # Update PPO & Epsilon
+                if bot_hybrid.use_ai:
+                    loss = update_ppo(bot_hybrid)
+                    bot_hybrid.update_epsilon() # 衰減 epsilon
+                    
+                    print(f"Ep {episode+1} | Reward: {total_reward:.2f} | Loss: {loss:.4f} | Epsilon: {bot_hybrid.epsilon:.4f}")
+                    writer.add_scalar('Hybrid/Reward', total_reward, episode)
+                    writer.add_scalar('Hybrid/Epsilon', bot_hybrid.epsilon, episode)
+                else:
+                    print(f"Ep {episode+1} | AI did not take over (Script running)")
+                
+                writer.flush()
+                
+                # Check Timer for Saving (Every 30 mins)
+                if time.time() - last_save_time > SAVE_INTERVAL_MINUTES * 60:
+                    save_model(bot_hybrid, log_dir, episode + 1)
+                    last_save_time = time.time()
+
+    except KeyboardInterrupt:
+        print("User interrupted.")
+    finally:
+        writer.close()
+
+if __name__ == "__main__":
+    app.run(main)
