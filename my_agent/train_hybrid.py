@@ -17,6 +17,28 @@ from pysc2.env import sc2_env
 from pysc2.lib import actions, features, units
 from torch.utils.tensorboard import SummaryWriter
 
+# ==========================================
+# ===   【使用者設定區：熱啟動與存檔】   ===
+# ==========================================
+
+# 1. 是否載入之前的模型繼續訓練？ (True = 是, False = 從頭開始)
+LOAD_EXISTING_MODEL = False 
+
+# 2. 如果上面是 True，請填寫 .pth 檔案的完整路徑
+#    例如: "./Models/hybrid_model_ep50.pth"
+MODEL_PATH_TO_LOAD = "./Models/hybrid_model_ep100.pth"
+
+# 3. 載入模型後的探索率 (Epsilon)
+#    如果您載入的是已經很聰明的模型，建議設低一點 (例如 0.1 或 0.3)
+#    如果您希望它載入後還是大量亂試，可以設高一點 (例如 0.8)
+LOADED_EPSILON = 0.3 
+
+# 4. 存檔頻率 (分鐘)
+SAVE_INTERVAL_MINUTES = 15
+MAX_TO_KEEP = 5
+
+# ==========================================
+
 # === 1. 全域參數與常數設定 ===
 LR = 0.0003
 GAMMA = 0.99
@@ -24,14 +46,10 @@ DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 TOTAL_EPISODES = 10000 
 PROBE_TARGET = 15 
 
-# --- Epsilon 設定 ---
+# --- Epsilon 設定 (從頭訓練時的預設值) ---
 EPSILON_START = 0.9
 EPSILON_END = 0.05      
 EPSILON_DECAY = 0.999    
-
-# --- 【修改點 1】存檔頻率改為 15 分鐘 ---
-SAVE_INTERVAL_MINUTES = 15
-MAX_TO_KEEP = 5
 
 # --- ID 定義 ---
 NEXUS_ID = 59 
@@ -72,22 +90,17 @@ HARVEST_ACTION = actions.FUNCTIONS.Harvest_Gather_screen.id
 NO_OP = actions.FUNCTIONS.no_op()
 
 # --- 地圖中心點 (Simple64) ---
-# 小地圖座標 (0-63)
 MAP_CENTER_MINIMAP = (32, 32)
-# 畫面座標 (0-83)
 MAP_CENTER_SCREEN = (42, 42)
 
 # === RL 動作輸出定義 (AI 部分) ===
-# 0-4: 建造 (雖然後期少用，但保留結構)
-# 5: F2 全軍攻擊探索 (隨機地點)
-# 6: 視角跟隨軍隊 (移動鏡頭)
 ACTION_DO_NOTHING = 0
 ACTION_BUILD_PROBE = 1
 ACTION_BUILD_PYLON = 2
 ACTION_BUILD_GATEWAY = 3
 ACTION_BUILD_ASSIMILATOR = 4
-ACTION_EXPLORE = 5           # <--- F2 + A 到隨機點
-ACTION_FOLLOW_CAM = 6        # <--- 鏡頭跟隨追獵者
+ACTION_EXPLORE = 5           
+ACTION_FOLLOW_CAM = 6        
 
 # === 2. PPO 模型 ===
 class ActorCritic(nn.Module):
@@ -109,7 +122,6 @@ class ActorCritic(nn.Module):
 # === 3. 主角 Agent (Protoss) ===
 class ProtossHybridAgent:
     def __init__(self):
-        # num_actions = 7
         self.model = ActorCritic(num_inputs=84*84, num_actions=7).to(DEVICE)
         self.optimizer = optim.Adam(self.model.parameters(), lr=LR)
         self.memory_states = []
@@ -120,6 +132,25 @@ class ProtossHybridAgent:
         self.epsilon = EPSILON_START
         self.reset_game_variables()
 
+    # --- 【新增功能】載入舊模型 ---
+    def load_model(self, path, new_epsilon=None):
+        if os.path.exists(path):
+            try:
+                self.model.load_state_dict(torch.load(path, map_location=DEVICE))
+                self.model.train() # 設定為訓練模式
+                print(f"✅ 成功載入模型權重: {path}")
+                
+                if new_epsilon is not None:
+                    self.epsilon = new_epsilon
+                    print(f"   -> 探索率 (Epsilon) 已更新為: {self.epsilon}")
+                return True
+            except Exception as e:
+                print(f"❌ 載入模型失敗: {e}")
+                return False
+        else:
+            print(f"⚠️ 找不到模型檔案: {path}，將從頭開始訓練。")
+            return False
+
     def reset_game(self):
         self.reset_game_variables()
         self.memory_states = []
@@ -128,7 +159,6 @@ class ProtossHybridAgent:
         self.memory_rewards = []
         self.memory_values = []
         
-        # 獎勵計算用狀態 (移除建築物)
         self.prev_stats = {
             "my_stalker_hp": 0, 
             "my_stalker_shield": 0,
@@ -170,15 +200,11 @@ class ProtossHybridAgent:
         
         if hasattr(obs.observation, 'raw_units'):
             for unit in obs.observation.raw_units:
-                # --- 我方單位 (Alliance = 1) ---
                 if unit.alliance == 1: 
                     if unit.unit_type == STALKER_ID:
                         stats["my_stalker_hp"] += unit.health
                         stats["my_stalker_shield"] += unit.shield
-                
-                # --- 敵方單位 (Alliance = 4) ---
                 elif unit.alliance == 4: 
-                    # 只計算掠奪者的血量，忽略建築物
                     if unit.unit_type == MARAUDER_ID: 
                         stats["enemy_total_hp"] += unit.health
                         stats["enemy_marauder_count"] += 1
@@ -188,35 +214,34 @@ class ProtossHybridAgent:
         current_stats = self.get_health_stats(obs)
         reward = 0
         
-        # 防止第一幀報錯
         if "my_stalker_shield" not in self.prev_stats:
             self.prev_stats["my_stalker_shield"] = 0
         
         # 1. 時間懲罰
         reward -= 0.0001 
 
-        # 2. 追獵者損失護盾 (-0.001)
+        # 2. 追獵者損失護盾
         if current_stats["my_stalker_shield"] < self.prev_stats["my_stalker_shield"]:
             shield_loss = self.prev_stats["my_stalker_shield"] - current_stats["my_stalker_shield"]
             reward -= shield_loss * 0.001
 
-        # 3. 追獵者損失生命 (-0.005)
+        # 3. 追獵者損失生命
         if current_stats["my_stalker_hp"] < self.prev_stats["my_stalker_hp"]:
             hp_loss = self.prev_stats["my_stalker_hp"] - current_stats["my_stalker_hp"]
             reward -= hp_loss * 0.005
 
-        # 4. 掠奪者損失生命 (+0.001)
+        # 4. 造成敵人傷害
         if current_stats["enemy_total_hp"] < self.prev_stats["enemy_total_hp"]:
             damage_dealt = self.prev_stats["enemy_total_hp"] - current_stats["enemy_total_hp"]
             if damage_dealt > 0:
                 reward += damage_dealt * 0.001
 
-        # 5. 擊殺掠奪者 (+0.1)
+        # 5. 擊殺掠奪者
         if current_stats["enemy_marauder_count"] < self.prev_stats["enemy_marauder_count"]:
             kills = self.prev_stats["enemy_marauder_count"] - current_stats["enemy_marauder_count"]
             reward += (kills * 0.1)
 
-        # 6. 全滅掠奪者 (+1)
+        # 6. 全滅掠奪者
         if self.prev_stats["enemy_marauder_count"] > 0 and current_stats["enemy_marauder_count"] == 0:
             reward += 1.0
 
@@ -233,7 +258,7 @@ class ProtossHybridAgent:
         else:
             return self.step_script(obs)
 
-    # === AI 邏輯 (修改重點) ===
+    # === AI 邏輯 ===
     def step_ai(self, obs):
         state_tensor = self.preprocess(obs)
         action_probs, state_value = self.model(state_tensor)
@@ -291,7 +316,6 @@ class ProtossHybridAgent:
         elif action_cmd == ACTION_BUILD_ASSIMILATOR:
             return NO_OP
 
-        # 動作 5: 全軍探索 (F2 + A 到隨機點)
         elif action_cmd == ACTION_EXPLORE:
             if actions.FUNCTIONS.select_army.id in obs.observation.available_actions:
                  return actions.FUNCTIONS.select_army("select")
@@ -301,7 +325,6 @@ class ProtossHybridAgent:
                  rand_y = random.randint(5, 59)
                  return actions.FUNCTIONS.Attack_minimap("now", (rand_x, rand_y))
         
-        # 動作 6: 鏡頭跟隨軍隊 (這個很重要，AI 知道可以動鏡頭)
         elif action_cmd == ACTION_FOLLOW_CAM:
             if MOVE_CAMERA_ACTION in obs.observation.available_actions:
                 y_stalkers, x_stalkers = (unit_type == STALKER_ID).nonzero()
@@ -310,7 +333,6 @@ class ProtossHybridAgent:
                     mean_y = int(y_stalkers.mean())
                     return actions.FUNCTIONS.move_camera((mean_x, mean_y))
                 else:
-                    # 如果當前畫面沒追獵者，試著移回地圖中心或隨機位置
                     return actions.FUNCTIONS.move_camera(MAP_CENTER_MINIMAP)
 
         return NO_OP
@@ -650,10 +672,9 @@ class ProtossHybridAgent:
                     return get_select_gateway_action()
             else:
                 self.state = 9
-                print(f"[Protoss] 5 Stalkers Ready. Preparing to Move Out.")
+                print(f"[Protoss] Stalkers Ready. Preparing to Move Out.")
                 return NO_OP
 
-        # === 修改點：神族出擊流程 ===
         elif self.state == 9:
             # Step 1: F2 全選
             if actions.FUNCTIONS.select_army.id in obs.observation.available_actions:
@@ -662,19 +683,17 @@ class ProtossHybridAgent:
             return NO_OP
 
         elif self.state == 10:
-            # Step 2: 移動鏡頭到中間 (讓 AI 接手時視野正確)
+            # Step 2: 移動鏡頭到中間
             if MOVE_CAMERA_ACTION in obs.observation.available_actions:
                 self.state = 11
                 return actions.FUNCTIONS.move_camera(MAP_CENTER_MINIMAP)
             return NO_OP
 
         elif self.state == 11:
-            # Step 3: A-Move 到中間 (確保部隊走過去)
-            # 這裡使用 Attack_screen，因為我們剛剛已經把鏡頭移過去了
+            # Step 3: A-Move 到中間
             if actions.FUNCTIONS.Attack_screen.id in obs.observation.available_actions:
                 self.state = 12
                 return actions.FUNCTIONS.Attack_screen("now", MAP_CENTER_SCREEN)
-            # 如果不行的話用 minimap
             elif actions.FUNCTIONS.Attack_minimap.id in obs.observation.available_actions:
                 self.state = 12
                 return actions.FUNCTIONS.Attack_minimap("now", MAP_CENTER_MINIMAP)
@@ -690,7 +709,7 @@ class ProtossHybridAgent:
 
         return NO_OP
 
-# === 4. 對手 (Terran Bot - 腳本修改版) ===
+# === 4. 對手 (Terran Bot) ===
 class TerranBot:
     def __init__(self):
         self.state = -1
@@ -713,7 +732,7 @@ class TerranBot:
         self.cc_y_screen = 0
         self.camera_centered = False   
         self.is_first_step = True
-        self.attack_coordinates = MAP_CENTER_MINIMAP # 設定為地圖中心
+        self.attack_coordinates = MAP_CENTER_MINIMAP
 
     def step(self, obs):
         unit_type_screen = obs.observation.feature_screen[features.SCREEN_FEATURES.unit_type.index]
@@ -979,34 +998,29 @@ class TerranBot:
                     return get_select_barracks_action()
             else:
                 self.state = 8
-                print(f"[Terran] 5 Marauders Ready. Moving to Center.")
+                print(f"[Terran] Marauders Ready. Moving to Center.")
                 return NO_OP
 
-        # === 修改點：人族出擊並待命流程 ===
         elif self.state == 8:
-            # Step 1: F2 全選
             if actions.FUNCTIONS.select_army.id in obs.observation.available_actions:
                 self.state = 9
                 return actions.FUNCTIONS.select_army("select")
             return NO_OP
 
         elif self.state == 9:
-            # Step 2: 移動鏡頭到中間 (非必須，但保持邏輯一致)
             if MOVE_CAMERA_ACTION in obs.observation.available_actions:
                 self.state = 10
                 return actions.FUNCTIONS.move_camera(MAP_CENTER_MINIMAP)
             return NO_OP
         
         elif self.state == 10:
-             # Step 3: A-Move 到中間
             if actions.FUNCTIONS.Attack_minimap.id in obs.observation.available_actions:
                 self.state = 11 
                 return actions.FUNCTIONS.Attack_minimap("now", MAP_CENTER_MINIMAP)
             return NO_OP
 
         elif self.state == 11:
-            # Step 4: 到達後待命 (偶爾發個 Attack 指令保持警戒，避免發呆)
-            if random.random() < 0.02: # 每 50 幀左右按一次 A
+            if random.random() < 0.02: 
                 if actions.FUNCTIONS.Attack_minimap.id in obs.observation.available_actions:
                     return actions.FUNCTIONS.Attack_minimap("now", MAP_CENTER_MINIMAP)
             return NO_OP
@@ -1044,9 +1058,7 @@ def update_ppo(agent):
     agent.optimizer.step()
     return total_loss.item()
 
-# --- 【修改點 2】存檔函數更新：使用指定的 model_dir ---
 def save_model(agent, model_dir, episode):
-    # 確保資料夾存在 (雖然 main 裡有做，但為了安全起見)
     if not os.path.exists(model_dir):
         os.makedirs(model_dir)
         
@@ -1054,7 +1066,6 @@ def save_model(agent, model_dir, episode):
     torch.save(agent.model.state_dict(), filename)
     print(f"Model saved: {filename}")
     
-    # 清理舊檔案
     files = sorted(glob.glob(os.path.join(model_dir, "hybrid_model_ep*.pth")), key=os.path.getmtime)
     if len(files) > MAX_TO_KEEP:
         for f in files[:-MAX_TO_KEEP]:
@@ -1064,16 +1075,13 @@ def save_model(agent, model_dir, episode):
                 print(f"Error removing old model file: {e}")
 
 def main(argv):
-    print("=== SC2 Hybrid Agent (Center Combat Training) ===")
-    current_time_str = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M_Hybrid_CenterCombat")
+    print("=== SC2 Hybrid Agent (Center Combat) ===")
+    current_time_str = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M_Hybrid")
     
-    # 這是原本的 log_dir (放 TensorBoard 數據用)
     log_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs", current_time_str)
     if not os.path.exists(log_dir):
         os.makedirs(log_dir)
     
-    # --- 【修改點 3】建立模型存檔專用資料夾 (.\my_agent\Models) ---
-    # 假設這支程式是在 my_agent 資料夾下執行，我們直接在當前目錄建立 Models
     model_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Models")
     if not os.path.exists(model_dir):
         os.makedirs(model_dir)
@@ -1084,10 +1092,16 @@ def main(argv):
     bot_hybrid = ProtossHybridAgent()
     bot_opponent = TerranBot() 
 
+    # --- 【新增功能】檢查是否需要載入舊模型 ---
+    if LOAD_EXISTING_MODEL:
+        if bot_hybrid.load_model(MODEL_PATH_TO_LOAD, new_epsilon=LOADED_EPSILON):
+            print(">>> 舊模型載入成功，準備繼續訓練 <<<")
+        else:
+            print(">>> 舊模型載入失敗，將使用新模型開始 <<<")
+
     last_save_time = time.time()
     
     try:
-        # --- 【修改點 4】遊戲步數改為 8000 ---
         with sc2_env.SC2Env(
             map_name="Simple64",
             players=[
@@ -1099,7 +1113,7 @@ def main(argv):
                 use_raw_units=True, 
             ),
             step_mul=8,
-            game_steps_per_episode=8000, # 遊戲步數
+            game_steps_per_episode=8000,
             visualize=True
         ) as env:
             for episode in range(TOTAL_EPISODES):
@@ -1113,12 +1127,10 @@ def main(argv):
                 while True:
                     step_count += 1
                     
-                    # --- 【修改點 5】將存檔檢查移入遊戲迴圈 ---
-                    # 這樣即使遊戲沒打完，時間到了也會存檔
                     if time.time() - last_save_time > SAVE_INTERVAL_MINUTES * 60:
-                        save_model(bot_hybrid, model_dir, episode + 1) # 傳入 model_dir
+                        save_model(bot_hybrid, model_dir, episode + 1)
                         last_save_time = time.time()
-                        print(f"[Auto-Save] Time limit reached. Saved model at Episode {episode+1}, Step {step_count}")
+                        print(f"[Auto-Save] Saved model at Episode {episode+1}, Step {step_count}")
                     
                     try:
                         action_protoss = bot_hybrid.step(obs_list[0])
@@ -1149,7 +1161,6 @@ def main(argv):
                     print(f"Ep {episode+1} | Script Running (No AI update)")
                 
                 writer.flush()
-                # 這裡保留原本的存檔檢查，以防萬一剛好在迴圈外觸發
                 if time.time() - last_save_time > SAVE_INTERVAL_MINUTES * 60:
                     save_model(bot_hybrid, model_dir, episode + 1)
                     last_save_time = time.time()
