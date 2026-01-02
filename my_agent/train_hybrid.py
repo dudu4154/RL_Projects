@@ -34,8 +34,8 @@ MODEL_PATH_TO_LOAD = "./Models/hybrid_model_ep100.pth"
 LOADED_EPSILON = 0.3 
 
 # 4. 存檔頻率 (分鐘)
-SAVE_INTERVAL_MINUTES = 15
-MAX_TO_KEEP = 5
+SAVE_INTERVAL_MINUTES = 2
+MAX_TO_KEEP = 10000
 
 # ==========================================
 
@@ -1113,7 +1113,7 @@ def main(argv):
                 use_raw_units=True, 
             ),
             step_mul=8,
-            game_steps_per_episode=8000,
+            game_steps_per_episode=800000,
             visualize=True
         ) as env:
             for episode in range(TOTAL_EPISODES):
