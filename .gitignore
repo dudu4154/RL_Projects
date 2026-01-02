@@ -1,6 +1,6 @@
 ﻿sc2_new_env/
 sc2_new_env/
 sc2_new_env/
-my_agent/ppo_model.py
+
 my_agent/pvt_agent_fight.py
 
