@@ -2,9 +2,9 @@
 全部都是終端指令
 終端依序執行下面指令進虛擬環境(每一次都要跑)
 
-cd "E:\RL_Projects"
-.\sc2_new_env\Scripts\activate
-cd "E:\RL_Projects\my_agent"
+cd "D:\RL_Projects\SC2AIprogectpy"
+D:\RL_Projects\sc2_new_env\Scripts\activate
+cd "D:\RL_Projects\SC2AIprogectpy\my_agent"
 $env:SC2PATH = "D:\StarCraft II"
 
  #這個要看你的星海在哪裡 指到資料夾就好
