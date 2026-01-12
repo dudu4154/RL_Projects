@@ -1,5 +1,13 @@
 ﻿sc2_new_env/
+<<<<<<< HEAD
 logs/
 **/__pycache__/
 *.pyc
 *.pth
+=======
+sc2_new_env/
+sc2_new_env/
+
+my_agent/pvt_agent_fight.py
+
+>>>>>>> f2be0a9ecbc52aef55cffde20fc6a9992b36e98d
