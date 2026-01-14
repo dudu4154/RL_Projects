@@ -2,15 +2,12 @@
 全部都是終端指令
 終端依序執行下面指令進虛擬環境(每一次都要跑)
 
-<<<<<<< HEAD
-cd "D:\RL_Projects\SC2AIprogectpy"
+cd "ㄕD:\RL_Projects\SC2AIprogectpy"
 D:\RL_Projects\sc2_new_env\Scripts\activate
 cd "D:\RL_Projects\SC2AIprogectpy\my_agent"
-=======
 cd "E:\RL_Projects"
 .\sc2_new_env\Scripts\activate
 cd "E:\RL_Projects\my_agent"
->>>>>>> f2be0a9ecbc52aef55cffde20fc6a9992b36e98d
 $env:SC2PATH = "D:\StarCraft II"
 
  #這個要看你的星海在哪裡 指到資料夾就好
@@ -18,21 +15,15 @@ $env:SC2PATH = "D:\StarCraft II"
 到這邊已經在虛擬環境裡了．接著是下載套件(跑過第一次較好)  
 
 終端執行下面指令先下載這些(執行一次之後不用再執行了)     #版本衝突問一下gemini 我具體版本有些忘了
-<<<<<<< HEAD
-=======
 
->>>>>>> f2be0a9ecbc52aef55cffde20fc6a9992b36e98d
 pip install pysc2 torch absl-py tensorboard
 pip install "protobuf==3.20.3" "numpy==1.23.5"
 
 這邊可以跑AI生log下面都是指令 
 log出來都在.\RL_Projects\my_agent\logs裡面
 
-<<<<<<< HEAD
-=======
 
 
->>>>>>> f2be0a9ecbc52aef55cffde20fc6a9992b36e98d
 python train_hybrid.py    #跑AI
 python -m tensorboard.main --logdir=logs  #看log的指令 會是本地的網址
 
