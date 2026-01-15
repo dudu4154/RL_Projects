@@ -1,176 +1,249 @@
+import os
+import random
+import numpy as np
 import csv
 import time
-import os
-import sc2
-from sc2 import maps
-from sc2.bot_ai import BotAI
-from sc2.data import Race, Difficulty
-from sc2.main import run_game
-from sc2.player import Bot, Computer
-from sc2.ids.unit_typeid import UnitTypeId
+from absl import app
+from pysc2.env import sc2_env
+from pysc2.lib import actions, features, units
 
-# 設定遊戲路徑 (請確認這是你的路徑)
-os.environ["SC2PATH"] = r"D:\StarCraft II"
+# 定義人族單位 ID
+COMMAND_CENTER_ID = 18
+SUPPLY_DEPOT_ID = 19
+REFINERY_ID = 20
+BARRACKS_ID = 21
+BARRACKS_TECHLAB_ID = 37
+SCV_ID = 45
+MARAUDER_ID = 51
+MINERAL_FIELD_ID = 341
+GEYSER_ID = 342
 
 # =========================================================
-# 📊 模組 1: 數據收集器 (DataCollector)
-# 用途: 記錄每一刻的資源與決策，這是 AI 專題的精隨
+# 📊 數據收集器: 紀錄資源與訓練狀態
 # =========================================================
 class DataCollector:
     def __init__(self):
         if not os.path.exists("logs"):
             os.makedirs("logs")
-        self.filename = f"logs/marauder_log_{int(time.time())}.csv"
-        
+        self.filename = f"logs/terran_log_{int(time.time())}.csv"
         with open(self.filename, mode='w', newline='') as file:
             writer = csv.writer(file)
-            writer.writerow([
-                "Time", "Minerals", "Vespene", 
-                "Supply_Used", "Marauder_Count", 
-                "Decision_Type", "Decision_Target"
-            ])
+            writer.writerow(["Time", "Minerals", "Vespene", "Workers", "Ideal", "Action_ID"])
 
-    def log_step(self, time, minerals, vespene, supply, count, decision):
-        d_type = decision[0] if decision else "None"
-        d_target = decision[1] if decision else "None"
-
+    def log_step(self, time_val, minerals, vespene, workers, ideal, action_id):
+        # 轉為 float 以避免 NumPy 類型在 round 時報錯
+        display_time = float(time_val) 
         with open(self.filename, mode='a', newline='') as file:
             writer = csv.writer(file)
-            writer.writerow([
-                round(time, 2), minerals, vespene, 
-                supply, count, d_type, d_target
-            ])
+            writer.writerow([round(display_time, 2), minerals, vespene, workers, ideal, action_id])
 
 # =========================================================
-# 🧠 模組 2: 生產大腦 (ProductionAI) - 這是你負責的核心 A 部分
-# 用途: 判斷缺什麼，發出指令
+# 🧠 生產大腦: 整合所有功能與修正
 # =========================================================
 class ProductionAI:
-    def __init__(self, bot):
-        self.bot = bot
-        self.collector = DataCollector()
-        
-        # 初始化目標
-        self.target_units = {}
-        self.target_structures = {}
-
-    def set_goals(self, units, structures):
-        self.target_units = units
-        self.target_structures = structures
-
-    def make_decision(self):
-        """ A 部分的核心邏輯：優先級決策樹 """
-        decision = None
-
-        # 1. 生存優先 (Supply)
-        if (self.bot.supply_left < 5 and self.bot.supply_cap < 200 
-            and self.bot.structures(UnitTypeId.SUPPLYDEPOT).not_ready.amount == 0):
-            if self.bot.can_afford(UnitTypeId.SUPPLYDEPOT):
-                decision = ("BUILD", UnitTypeId.SUPPLYDEPOT)
-
-        # 2. 建築優先 (Structure) - 包含 兵營、瓦斯廠、科技實驗室
-        if not decision:
-            for s_id, goal in self.target_structures.items():
-                # 這裡的 amount 會計算 (已完成 + 建造中) 的數量
-                if self.bot.structures(s_id).amount < goal:
-                    if self.bot.can_afford(s_id):
-                        decision = ("BUILD", s_id)
-                        break
-
-        # 3. 單位優先 (Unit) - 這裡就是造掠奪者
-        if not decision:
-            for u_id, goal in self.target_units.items():
-                if self.bot.units(u_id).amount < goal:
-                    if self.bot.can_afford(u_id):
-                        decision = ("TRAIN", u_id)
-                        break
-
-        # 4. 記錄數據 (Log)
-        self.collector.log_step(
-            time=self.bot.time,
-            minerals=self.bot.minerals,
-            vespene=self.bot.vespene,
-            supply=self.bot.supply_used,
-            count=self.bot.units(UnitTypeId.MARAUDER).amount, # 記錄掠奪者數量
-            decision=decision
-        )
-
-        return decision
-
-# =========================================================
-# 🤖 主程式: 掠奪者專題機器人 (MarauderBot)
-# 用途: 設定目標，並模擬 B 部分的執行
-# =========================================================
-class MarauderBot(BotAI):
     def __init__(self):
-        self.brain = ProductionAI(self)
+        self.collector = DataCollector()
+        self.depots_built = 0
+        self.refinery_target = None
+        self.cc_x_screen = 42
+        self.cc_y_screen = 42
+        self.gas_workers_assigned = 0
+        
+        # 鏡頭管理座標
+        self.base_minimap_coords = None 
+        self.scan_points = []
+        self.current_scan_idx = 0
 
-    async def on_step(self, iteration):
-        # 0. 基礎運作：工兵自動挖礦
-        await self.distribute_workers()
+    def get_action(self, obs, action_id):
+        """ 
+        0:無動作, 1:造SCV, 2:蓋補給站, 3:蓋瓦斯廠, 4:採瓦斯, 
+        5:蓋兵營, 6:研發科技, 7:造掠奪者, 8:擴散掃描, 9:擴張開礦
+        """
+        unit_type = obs.observation.feature_screen[features.SCREEN_FEATURES.unit_type.index]
+        player = obs.observation.player
+        available = obs.observation.available_actions
 
-        # ==========================================
-        # 🎯 [專題目標設定]
-        # 這裡告訴 A 大腦：我要 5 隻掠奪者，你需要準備什麼設施
-        # ==========================================
-        self.brain.set_goals(
-            # 目標單位
-            units={
-                UnitTypeId.MARAUDER: 5 
-            },
-            # 目標設施 (掠奪者需要：兵營 -> 瓦斯 -> 科技實驗室)
-            structures={
-                UnitTypeId.BARRACKS: 2,         # 2 座兵營
-                UnitTypeId.REFINERY: 1,         # 1 座瓦斯廠 (一定要有，不然沒瓦斯)
-                UnitTypeId.BARRACKSTECHLAB: 2   # 2 個科技掛件 (一定要有，不然不能造)
-            }
-        )
+        # --- 1. 座標與防禦型掃描點初始化 ---
+        if self.base_minimap_coords is None:
+            player_relative_mini = obs.observation.feature_minimap[features.MINIMAP_FEATURES.player_relative.index]
+            y_mini, x_mini = (player_relative_mini == features.PlayerRelative.SELF).nonzero()
+            if x_mini.any():
+                bx, by = int(x_mini.mean()), int(y_mini.mean())
+                self.base_minimap_coords = (bx, by)
+                # 以基地為中心擴散的掃描點
+                offsets = [(0, 0), (20, 0), (-20, 0), (0, 20), (0, -20), (15, 15), (-15, -15)]
+                self.scan_points = [(np.clip(bx + dx, 0, 63), np.clip(by + dy, 0, 63)) for dx, dy in offsets]
 
-        # 1. 呼叫 A 大腦做決策
-        decision = self.brain.make_decision()
+        # --- 2. 視角跳轉邏輯 (修正關鍵) ---
+        cc_y, cc_x = (unit_type == COMMAND_CENTER_ID).nonzero()
+        
+        # Action 9 (開礦): 若畫面看得到主基，說明還沒跳轉到礦區
+        if action_id == 9 and cc_x.any():
+            return actions.FUNCTIONS.move_camera(self.scan_points[1]) # 跳轉到第一個擴散點
 
-        # 2. 執行決策 (模擬 B 部分)
-        if decision:
-            action, target = decision
-            
-            # 在終端機印出指令，讓你確認 A 是不是正常運作
-            print(f"[{self.time:.1f}s] A發出指令: {action} -> {target}")
+        # Action 0-7 (基礎營運): 若畫面沒基地，強制拉回主基地
+        if action_id <= 7 and not cc_x.any() and self.base_minimap_coords:
+            return actions.FUNCTIONS.move_camera(self.base_minimap_coords)
 
-            if action == "BUILD":
-                # --- 蓋建築邏輯 ---
-                if target == UnitTypeId.SUPPLYDEPOT:
-                    await self.build(target, near=self.townhalls.first)
-                
-                elif target == UnitTypeId.BARRACKS:
-                    await self.build(target, near=self.townhalls.first)
-                
-                elif target == UnitTypeId.REFINERY:
-                    # 找離家最近的瓦斯泉蓋
-                    for vg in self.vespene_geyser.closer_than(10, self.townhalls.first):
-                        if not self.structures(UnitTypeId.REFINERY).closer_than(1, vg).exists:
-                            await self.build(target, vg)
-                            break
-                            
-                elif target == UnitTypeId.BARRACKSTECHLAB:
-                    # 找一個「沒有掛件」的兵營來蓋實驗室
-                    for b in self.structures(UnitTypeId.BARRACKS).ready:
-                        if b.add_on_tag == 0:
-                            b.build(target)
-                            break
+        # 更新基地在螢幕中的座標
+        if cc_x.any():
+            self.cc_x_screen, self.cc_y_screen = int(cc_x.mean()), int(cc_y.mean())
 
-            elif action == "TRAIN":
-                # --- 造兵邏輯 ---
-                if target == UnitTypeId.MARAUDER:
-                    # 找一個「有掛科技實驗室」且「閒置」的兵營來生產
-                    producers = self.structures(UnitTypeId.BARRACKS).ready.idle
-                    for b in producers:
-                        if b.has_techlab: 
-                            b.train(target)
-                            break
+        # 動態工兵飽和計算
+        current_workers = player.food_workers
+        refinery_pixels = np.sum(unit_type == REFINERY_ID)
+        refinery_count = int(refinery_pixels / 80) # 改用 80 像素作為門檻，解決識別錯誤
+        ideal_workers = 16 + (refinery_count * 3)
+        self.collector.log_step(obs.observation.game_loop, player.minerals, 
+                                player.vespene, current_workers, ideal_workers, action_id)
+
+        # --- 3. 完整動作邏輯分支 ---
+
+        # [Action 1] 訓練 SCV (飽和度檢查)
+        if action_id == 1:
+            if current_workers < ideal_workers and player.minerals >= 50:
+                if actions.FUNCTIONS.Train_SCV_quick.id in available:
+                    return actions.FUNCTIONS.Train_SCV_quick("now")
+            return self._select_unit(unit_type, COMMAND_CENTER_ID)
+
+        # [Action 2] 建造補給站 (三角形排列邏輯)
+        elif action_id == 2:
+            if player.minerals >= 100 and actions.FUNCTIONS.Build_SupplyDepot_screen.id in available:
+                target = self._calc_depot_pos()
+                return actions.FUNCTIONS.Build_SupplyDepot_screen("now", target)
+            return self._select_scv(unit_type)
+
+        # [Action 3] 建造瓦斯廠 (精確中心鎖定)
+        elif action_id == 3:
+            if player.minerals >= 75 and actions.FUNCTIONS.Build_Refinery_screen.id in available:
+                self.refinery_target = self._find_geyser(unit_type)
+                if self.refinery_target:
+                    return actions.FUNCTIONS.Build_Refinery_screen("now", self.refinery_target)
+            return self._select_scv(unit_type)
+
+        # [Action 4] 指派採瓦斯 (上限 3 人/廠)
+        elif action_id == 4:
+            max_gas_allowed = refinery_count * 3
+            if self.gas_workers_assigned < max_gas_allowed and self.refinery_target:
+                if actions.FUNCTIONS.Harvest_Gather_screen.id in available:
+                    self.gas_workers_assigned += 1
+                    return actions.FUNCTIONS.Harvest_Gather_screen("now", self.refinery_target)
+                return self._select_scv_filtered(unit_type, self.refinery_target)
+            return actions.FUNCTIONS.no_op()
+
+        # [Action 5] 建造兵營 (自動位移邏輯)
+        elif action_id == 5:
+            if player.minerals >= 150 and actions.FUNCTIONS.Build_Barracks_screen.id in available:
+                target = self._calc_barracks_pos(obs)
+                return actions.FUNCTIONS.Build_Barracks_screen("now", target)
+            return self._select_scv(unit_type)
+
+        # [Action 6] 研發科技實驗室 (造掠奪者必備)
+        elif action_id == 6:
+            if player.minerals >= 50 and player.vespene >= 25:
+                if actions.FUNCTIONS.Build_TechLab_quick.id in available:
+                    return actions.FUNCTIONS.Build_TechLab_quick("now")
+            return self._select_unit(unit_type, BARRACKS_ID)
+
+        # [Action 7] 訓練掠奪者
+        elif action_id == 7:
+            if player.minerals >= 100 and player.vespene >= 25:
+                if actions.FUNCTIONS.Train_Marauder_quick.id in available:
+                    return actions.FUNCTIONS.Train_Marauder_quick("now")
+            return self._select_unit(unit_type, BARRACKS_ID)
+
+        # [Action 8] 中心擴散掃描 (偵察周邊)
+        elif action_id == 8:
+            target = self.scan_points[self.current_scan_idx]
+            self.current_scan_idx = (self.current_scan_idx + 1) % len(self.scan_points)
+            return actions.FUNCTIONS.move_camera(target)
+
+        # [Action 9] 在視角中心建造二礦
+        elif action_id == 9:
+            if player.minerals >= 400 and actions.FUNCTIONS.Build_CommandCenter_screen.id in available:
+                return actions.FUNCTIONS.Build_CommandCenter_screen("now", (42, 42))
+            return self._select_scv(unit_type)
+
+        return actions.FUNCTIONS.no_op()
+
+    # --- 內部輔助函式 ---
+    def _select_unit(self, unit_type, unit_id):
+        y, x = (unit_type == unit_id).nonzero()
+        if x.any():
+            return actions.FUNCTIONS.select_point("select", (int(x.mean()), int(y.mean())))
+        return actions.FUNCTIONS.no_op()
+
+    def _select_scv(self, unit_type):
+        y, x = (unit_type == SCV_ID).nonzero()
+        if x.any():
+            idx = random.randint(0, len(x) - 1)
+            return actions.FUNCTIONS.select_point("select", (x[idx], y[idx]))
+        return actions.FUNCTIONS.no_op()
+
+    def _select_scv_filtered(self, unit_type, target):
+        """ 選取遠離目標資源點的工兵，避免拉走正在採氣的人 """
+        y, x = (unit_type == SCV_ID).nonzero()
+        if x.any() and target:
+            dist = np.sqrt((x - target[0])**2 + (y - target[1])**2)
+            mask = dist > 15 
+            if mask.any():
+                idx = random.choice(np.where(mask)[0])
+                return actions.FUNCTIONS.select_point("select", (x[idx], y[idx]))
+        return self._select_scv(unit_type)
+
+    def _calc_depot_pos(self):
+        """ 三角形排列座標計算 """
+        if self.depots_built == 0:
+            target = (self.cc_x_screen + 15, self.cc_y_screen + 15)
+        elif self.depots_built == 1:
+            target = (self.cc_x_screen + 27, self.cc_y_screen + 15)
+        else:
+            target = (self.cc_x_screen + 21, self.cc_y_screen + 27)
+        self.depots_built = (self.depots_built + 1) % 3
+        return (np.clip(target[0], 0, 83), np.clip(target[1], 0, 83))
+
+    def _calc_barracks_pos(self, obs):
+        """ 根據出生點自動判斷兵營位移 """
+        player_relative = obs.observation.feature_minimap[features.MINIMAP_FEATURES.player_relative.index]
+        _, x_mini = (player_relative == 1).nonzero()
+        offset_x = -30 if (x_mini.mean() if x_mini.any() else 0) > 32 else 30
+        return (np.clip(42 + offset_x, 0, 83), 42)
+
+    def _find_geyser(self, unit_type):
+        """ 局部像素遮罩：精確鎖定單一湧泉中心 """
+        y, x = (unit_type == GEYSER_ID).nonzero()
+        if x.any():
+            ax, ay = x[0], y[0]
+            mask = (np.abs(x - ax) < 10) & (np.abs(y - ay) < 10)
+            return (int(x[mask].mean()), int(y[mask].mean()))
+        return None
+
+# =========================================================
+# 🎮 主程式啟動器 (無限對局循環)
+# =========================================================
+def main(argv):
+    del argv
+    agent = ProductionAI()
+    with sc2_env.SC2Env(
+        map_name="Simple64",
+        players=[sc2_env.Agent(sc2_env.Race.terran), 
+                 sc2_env.Bot(sc2_env.Race.zerg, sc2_env.Difficulty.easy)],
+        agent_interface_format=sc2_env.AgentInterfaceFormat(
+            feature_dimensions=sc2_env.Dimensions(screen=84, minimap=64),
+            use_raw_units=False),
+        step_mul=16,
+        realtime=False,
+    ) as env:
+        while True:
+            print("--- 啟動新對局 ---")
+            obs_list = env.reset()
+            while True:
+                # 隨機選擇動作測試 (0-9)
+                action_id = random.randint(0, 9)
+                sc2_action = agent.get_action(obs_list[0], action_id)
+                obs_list = env.step([sc2_action])
+                if obs_list[0].last():
+                    break
 
 if __name__ == "__main__":
-    run_game(
-        maps.get("Simple64"),
-        [Bot(Race.Terran, MarauderBot()), Computer(Race.Zerg, Difficulty.Easy)],
-        realtime=True
-    )
+    app.run(main)

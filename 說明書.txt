@@ -2,9 +2,9 @@
 全部都是終端指令
 終端依序執行下面指令進虛擬環境(每一次都要跑)
 
-cd "ㄕD:\RL_Projects\SC2AIprogectpy"
-D:\RL_Projects\sc2_new_env\Scripts\activate
-cd "D:\RL_Projects\SC2AIprogectpy\my_agent"
+cd "E:\RL_Projects\SC2AIprogectpy"
+E:\RL_Projects\sc2_new_env\Scripts\activate
+cd "E:\RL_Projects\SC2AIprogectpy\my_agent"
 cd "E:\RL_Projects"
 .\sc2_new_env\Scripts\activate
 cd "E:\RL_Projects\my_agent"
@@ -26,7 +26,7 @@ log出來都在.\RL_Projects\my_agent\logs裡面
 
 python train_hybrid.py    #跑AI
 python -m tensorboard.main --logdir=logs  #看log的指令 會是本地的網址
-
+deactivate #退出環境
 python train_ppo.py ＃不用理他
 python pvt_agent_basic.py  # 執行杜明道的腳本的指令
 python pvt_agent_fight.py  # 執行楊以振的腳本的指令
