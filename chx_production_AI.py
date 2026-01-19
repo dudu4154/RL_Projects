@@ -440,3 +440,5 @@ def main(argv):
         print("程式已手動停止")
 
 # 如果腳本被直接執行，則運行main函數
+if __name__ == "__main__":
+    app.run(main)
