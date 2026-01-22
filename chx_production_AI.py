@@ -5,6 +5,13 @@ import csv  # CSV文件處理
 import time  # 時間相關功能
 import platform  # 平台檢測
 from absl import app  # Google的命令行應用框架
+
+# Fix for random.shuffle compatibility issue
+import chx_fix_random_shuffle
+import sys
+import os
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+
 from pysc2.env import sc2_env  # StarCraft II環境
 from pysc2.lib import actions, features, units  # StarCraft II動作、特徵和單位定義
 
@@ -58,7 +65,7 @@ class DataCollector:
     def log_step(self, time_val, minerals, vespene, workers, ideal, action_id, marauders_produced):
         """記錄每一步的遊戲狀態數據"""
         # 轉為 float 以避免 NumPy 類型在 round 時報錯
-        display_time = float(time_val)
+        display_time = float(time_val.item()) if hasattr(time_val, 'item') else float(time_val)
         # 將數據追加到CSV文件中，記錄當前遊戲狀態
         with open(self.filename, mode='a', newline='') as file:
             writer = csv.writer(file)
@@ -80,8 +87,10 @@ class ProductionAI:
         self.collector = DataCollector()
         # 已建造的補給站數量，用於三角形排列計算
         self.depots_built = 0
-        # 瓦斯廠目標位置，用於工兵採集瓦斯的導航
-        self.refinery_target = None
+        # 瓦斯廠目標位置列表，用於工兵採集瓦斯的導航
+        self.refinery_targets = []
+        # 已建造的瓦斯廠數量
+        self.refineries_built = 0
 
         # 畫面中心點預設值，用於建築物位置計算
         self.cc_x_screen = 42
@@ -105,7 +114,13 @@ class ProductionAI:
         # 追蹤建築物狀態，用於科技樹決策
         self.barracks_built = False
         self.techlab_built = False
-        self.refinery_built = False
+
+        # 追蹤已嘗試的瓦斯泉位置，避免重複嘗試
+        self.attempted_geyser_positions = set()
+        # 當前正在建造的瓦斯廠位置
+        self.current_refinery_target = None
+        # 瓦斯工人分配計時器
+        self.gas_worker_timer = 0
 
     def get_action(self, obs, action_id):
         """
@@ -168,6 +183,76 @@ class ProductionAI:
         refinery_count = int(refinery_pixels / 80) # 80 像素約為一個建築大小
         ideal_workers = 16 + (refinery_count * 3)
 
+        # 計算當前實際在採集瓦斯的工兵數量
+        # 找到所有在瓦斯廠附近的 SCV 工兵
+        gas_workers_actual = 0
+        if self.refinery_targets:
+            # 計算所有瓦斯廠附近的 SCV 數量
+            scv_y, scv_x = (unit_type == SCV_ID).nonzero()
+            if scv_x.any() and scv_y.any():
+                for refinery_target in self.refinery_targets:
+                    if refinery_target:
+                        distances = np.sqrt((scv_x - refinery_target[0])**2 + (scv_y - refinery_target[1])**2)
+                        gas_workers_actual += np.sum(distances < 10)
+        self.gas_workers_assigned = int(gas_workers_actual)  # 更新實際瓦斯工兵數量
+
+        # 瓦斯工人分配 - 更頻繁地檢查和分配工人
+        self.gas_worker_timer = (self.gas_worker_timer + 1) % 10
+        if self.gas_worker_timer == 0:
+            # 每10步檢查一次瓦斯工人分配，更頻繁地維護工人數量
+            self._assign_gas_workers_if_needed(obs, unit_type)
+
+        # 立即檢查並補足瓦斯工人數量，確保兩個瓦斯泉都有3個工人
+        if refinery_count > 0 and self.refinery_targets:
+            max_gas_allowed = refinery_count * 3
+            if gas_workers_actual < max_gas_allowed and actions.FUNCTIONS.Harvest_Gather_screen.id in available:
+                # 立即嘗試補足工人數量 - 直接執行工人分配邏輯
+                scv_y, scv_x = (unit_type == SCV_ID).nonzero()
+                if scv_x.any() and scv_y.any():
+                    # 找到工人最少的瓦斯廠並優先補足
+                    min_workers = float('inf')
+                    target_refinery = None
+
+                    for refinery_target in self.refinery_targets:
+                        if refinery_target:
+                            distances = np.sqrt((scv_x - refinery_target[0])**2 + (scv_y - refinery_target[1])**2)
+                            workers_here = np.sum(distances < 10)
+                            if workers_here < min_workers:
+                                min_workers = workers_here
+                                target_refinery = refinery_target
+
+                    # 如果找到目標瓦斯廠，則指派工兵
+                    if target_refinery:
+                        # 選擇遠離目標的SCV以避免干擾正在採氣的工兵
+                        dist = np.sqrt((scv_x - target_refinery[0])**2 + (scv_y - target_refinery[1])**2)
+                        mask = dist > 15
+                        if mask.any():
+                            valid_indices = np.where(mask)[0]
+                            idx = random.choice(valid_indices)
+                            self.gas_workers_assigned += 1
+                            return actions.FUNCTIONS.Harvest_Gather_screen("now", target_refinery)
+                        else:
+                            # 如果沒有遠離的工兵，選擇任何工兵
+                            idx = random.randint(0, len(scv_x) - 1)
+                            self.gas_workers_assigned += 1
+                            return actions.FUNCTIONS.Harvest_Gather_screen("now", target_refinery)
+                    elif self.refinery_targets:
+                        # 如果沒有找到最優目標，使用第一個瓦斯廠目標
+                        target_refinery = self.refinery_targets[0]
+                        # 選擇遠離目標的SCV以避免干擾正在採氣的工兵
+                        dist = np.sqrt((scv_x - target_refinery[0])**2 + (scv_y - target_refinery[1])**2)
+                        mask = dist > 15
+                        if mask.any():
+                            valid_indices = np.where(mask)[0]
+                            idx = random.choice(valid_indices)
+                            self.gas_workers_assigned += 1
+                            return actions.FUNCTIONS.Harvest_Gather_screen("now", target_refinery)
+                        else:
+                            # 如果沒有遠離的工兵，選擇任何工兵
+                            idx = random.randint(0, len(scv_x) - 1)
+                            self.gas_workers_assigned += 1
+                            return actions.FUNCTIONS.Harvest_Gather_screen("now", target_refinery)
+
         # 更新建築物狀態，檢查哪些建築已經建造完成
         self._update_building_status(unit_type)
 
@@ -204,7 +289,7 @@ class ProductionAI:
         elif action_id == 2:
             # 如果礦物足夠且可以建造補給站，則建造補給站
             if player.minerals >= 100 and actions.FUNCTIONS.Build_SupplyDepot_screen.id in available:
-                target = self._calc_depot_pos()
+                target = self._calc_depot_pos(unit_type)
                 return actions.FUNCTIONS.Build_SupplyDepot_screen("now", target)
             # 選擇SCV以建造補給站
             return self._select_scv(unit_type)
@@ -213,30 +298,78 @@ class ProductionAI:
         # 1. 建造建築物: 檢查科技樹 >>> 確認資源足夠 >>> 選取空閒的工兵 >>> 選取在挖礦的工兵 >>> 使用技能 >>> 尋找可放置的地點 >>> 派遣工兵建造
         # 3. 派遣工兵挖瓦斯: 選取空閒的工兵 >>> 選取在挖礦的工兵 >>> 尋找未達上限的瓦斯 >>> 派遣工兵建造瓦斯 >>> 開始挖瓦斯 >>> 補足挖瓦斯人數（三人）
         # =========================================================
-        # [Action 3] 建造瓦斯廠 (掠奪者需要瓦斯)
+        # [Action 3] 建造瓦斯廠 (掠奪者需要瓦斯) - 確保兩個瓦斯泉都建造
         elif action_id == 3:
-            # 如果瓦斯廠尚未建造且礦物足夠，則建造瓦斯廠
-            if not self.refinery_built and player.minerals >= 75 and actions.FUNCTIONS.Build_Refinery_screen.id in available:
-                self.refinery_target = self._find_geyser(unit_type)
-                if self.refinery_target:
-                    return actions.FUNCTIONS.Build_Refinery_screen("now", self.refinery_target)
-            # 選擇SCV以建造瓦斯廠
+            # 尋找所有瓦斯泉
+            all_geysers = self._find_all_geysers(unit_type)
+
+            # 如果沒有找到任何瓦斯泉，嘗試移動相機來尋找
+            if not all_geysers and self.base_minimap_coords:
+                # 獲取下一個相機位置來系統地搜索地圖
+                next_camera_pos = self._get_next_camera_position_for_geysers()
+                return actions.FUNCTIONS.move_camera(next_camera_pos)
+
+            # 如果找到瓦斯泉，檢查哪些瓦斯泉還沒有建造瓦斯廠
+            if all_geysers and player.minerals >= 75 and actions.FUNCTIONS.Build_Refinery_screen.id in available:
+                # 找到還沒有瓦斯廠的瓦斯泉
+                geysers_without_refineries = []
+                for geyser_pos in all_geysers:
+                    # 檢查這個瓦斯泉附近是否已經有瓦斯廠
+                    has_refinery = False
+                    for refinery_target in self.refinery_targets:
+                        if refinery_target and np.sqrt((geyser_pos[0] - refinery_target[0])**2 + (geyser_pos[1] - refinery_target[1])**2) < 15:
+                            has_refinery = True
+                            break
+                    if not has_refinery:
+                        geysers_without_refineries.append(geyser_pos)
+
+                # 如果有瓦斯泉沒有瓦斯廠，建造在第一個這樣的瓦斯泉上
+                if geysers_without_refineries:
+                    target_geyser = geysers_without_refineries[0]
+                    # 添加到目標列表
+                    if target_geyser not in self.refinery_targets:
+                        self.refinery_targets.append(target_geyser)
+                    return actions.FUNCTIONS.Build_Refinery_screen("now", target_geyser)
+
+            # 如果所有瓦斯泉都已經有瓦斯廠，或者沒有資源，選擇SCV以備後續操作
             return self._select_scv(unit_type)
 
         # =========================================================
         # 3. 派遣工兵挖瓦斯: 選取空閒的工兵 >>> 選取在挖礦的工兵 >>> 尋找未達上限的瓦斯 >>> 派遣工兵建造瓦斯 >>> 開始挖瓦斯 >>> 補足挖瓦斯人數（三人）
         # =========================================================
-        # [Action 4] 指派採瓦斯 (確保有瓦斯生產)
+        # [Action 4] 指派採瓦斯 (確保有瓦斯生產) - 更積極地維護工人數量
         elif action_id == 4:
             # 計算最大允許的瓦斯工兵數量
             max_gas_allowed = refinery_count * 3
             # 如果瓦斯工兵數量不足且有瓦斯廠目標，則指派工兵採集瓦斯
-            if self.gas_workers_assigned < max_gas_allowed and self.refinery_target:
+            if self.gas_workers_assigned < max_gas_allowed and self.refinery_targets:
                 if actions.FUNCTIONS.Harvest_Gather_screen.id in available:
-                    self.gas_workers_assigned += 1
-                    return actions.FUNCTIONS.Harvest_Gather_screen("now", self.refinery_target)
+                    # 找到工人最少的瓦斯廠並優先補足
+                    min_workers = float('inf')
+                    target_refinery = None
+
+                    scv_y, scv_x = (unit_type == SCV_ID).nonzero()
+                    if scv_x.any() and scv_y.any():
+                        for refinery_target in self.refinery_targets:
+                            if refinery_target:
+                                distances = np.sqrt((scv_x - refinery_target[0])**2 + (scv_y - refinery_target[1])**2)
+                                workers_here = np.sum(distances < 10)
+                                if workers_here < min_workers:
+                                    min_workers = workers_here
+                                    target_refinery = refinery_target
+
+                    # 如果找到目標瓦斯廠，則指派工兵
+                    if target_refinery:
+                        self.gas_workers_assigned += 1
+                        return actions.FUNCTIONS.Harvest_Gather_screen("now", target_refinery)
+                    elif self.refinery_targets:
+                        # 如果沒有找到最優目標，使用第一個瓦斯廠目標
+                        self.gas_workers_assigned += 1
+                        return actions.FUNCTIONS.Harvest_Gather_screen("now", self.refinery_targets[0])
+
                 # 選擇遠離目標的SCV以避免干擾正在採氣的工兵
-                return self._select_scv_filtered(unit_type, self.refinery_target)
+                if self.refinery_targets:
+                    return self._select_scv_filtered(unit_type, self.refinery_targets[0])
             return actions.FUNCTIONS.no_op()
 
         # =========================================================
@@ -414,12 +547,106 @@ class ProductionAI:
         # 如果沒有符合條件的SCV，則使用普通選擇方法
         return self._select_scv(unit_type)
 
-    def _calc_depot_pos(self):
+    def _find_safe_building_position(self, unit_type, target_pos, max_attempts=5):
         """
-        三角形排列座標計算
+        尋找安全的建築位置，避免放置在礦物和指揮中心中間
 
-        這個方法用於計算補給站的建造位置，採用三角形排列模式。
-        這種排列方式可以最大化空間利用，同時確保補給站不會阻擋彼此。
+        這個方法檢查目標位置是否會阻擋礦物採集或指揮中心操作，如果會，則尋找替代位置。
+
+        參數:
+        - unit_type: 單位類型陣列，用於檢測礦物和指揮中心位置
+        - target_pos: 目標建築位置 (x, y)
+        - max_attempts: 最大尋找替代位置的嘗試次數
+
+        返回:
+        - 安全的建築位置 (x, y)
+        """
+        # 獲取礦物和指揮中心的位置
+        mineral_y, mineral_x = (unit_type == MINERAL_FIELD_ID).nonzero()
+        cc_y, cc_x = (unit_type == COMMAND_CENTER_ID).nonzero()
+
+        # 如果目標位置是安全的，直接返回
+        if self._is_position_safe(unit_type, target_pos, mineral_x, mineral_y, cc_x, cc_y):
+            return target_pos
+
+        # 如果目標位置不安全，尋找替代位置
+        for attempt in range(max_attempts):
+            # 生成隨機偏移
+            offset_x = random.randint(-10, 10)
+            offset_y = random.randint(-10, 10)
+
+            # 計算新的目標位置
+            new_target = (target_pos[0] + offset_x, target_pos[1] + offset_y)
+
+            # 檢查新位置是否安全
+            if self._is_position_safe(unit_type, new_target, mineral_x, mineral_y, cc_x, cc_y):
+                return new_target
+
+        # 如果多次尋找都沒有找到安全位置，返回原始位置
+        return target_pos
+
+    def _is_position_safe(self, unit_type, target_pos, mineral_x, mineral_y, cc_x, cc_y):
+        """
+        檢查建築位置是否安全
+
+        這個方法檢查目標位置是否會阻擋礦物採集或指揮中心操作。
+
+        參數:
+        - unit_type: 單位類型陣列
+        - target_pos: 目標建築位置 (x, y)
+        - mineral_x, mineral_y: 礦物位置座標
+        - cc_x, cc_y: 指揮中心位置座標
+
+        返回:
+        - True 如果位置安全，False 如果位置不安全
+        """
+        # 定義安全距離
+        safe_distance = 15  # 像素
+
+        # 檢查是否有礦物在附近
+        if mineral_x.any() and mineral_y.any():
+            distances_to_minerals = np.sqrt((mineral_x - target_pos[0])**2 + (mineral_y - target_pos[1])**2)
+            if np.any(distances_to_minerals < safe_distance):
+                return False
+
+        # 檢查是否有指揮中心在附近
+        if cc_x.any() and cc_y.any():
+            distances_to_cc = np.sqrt((cc_x - target_pos[0])**2 + (cc_y - target_pos[1])**2)
+            if np.any(distances_to_cc < safe_distance):
+                return False
+
+        # 檢查是否在指揮中心和礦物之間
+        if (mineral_x.any() and mineral_y.any() and cc_x.any() and cc_y.any()):
+            # 計算指揮中心到礦物的向量
+            cc_to_mineral_x = mineral_x.mean() - cc_x.mean()
+            cc_to_mineral_y = mineral_y.mean() - cc_y.mean()
+
+            # 計算指揮中心到目標位置的向量
+            cc_to_target_x = target_pos[0] - cc_x.mean()
+            cc_to_target_y = target_pos[1] - cc_y.mean()
+
+            # 計算點積和向量長度
+            dot_product = cc_to_mineral_x * cc_to_target_x + cc_to_mineral_y * cc_to_target_y
+            mineral_distance = np.sqrt(cc_to_mineral_x**2 + cc_to_mineral_y**2)
+            target_distance = np.sqrt(cc_to_target_x**2 + cc_to_target_y**2)
+
+            # 如果目標位置在指揮中心和礦物之間，則不安全
+            if (target_distance < mineral_distance and
+                dot_product > 0 and
+                abs(dot_product) > 0.8 * target_distance * mineral_distance):
+                return False
+
+        return True
+
+    def _calc_depot_pos(self, unit_type):
+        """
+        三角形排列座標計算 - 避免放置在礦物和指揮中心中間
+
+        這個方法用於計算補給站的建造位置，採用三角形排列模式，並避免放置在礦物和指揮中心中間。
+        這種排列方式可以最大化空間利用，同時確保補給站不會阻擋彼此或資源採集。
+
+        參數:
+        - unit_type: 單位類型陣列，用於檢測礦物和指揮中心位置
 
         返回:
         - 下一個補給站的建造位置（x, y座標）
@@ -435,8 +662,13 @@ class ProductionAI:
         else:
             # 第三個補給站位於第一個和第二個補給站之間的下方，形成三角形
             target = (self.cc_x_screen + 21, self.cc_y_screen + 27)
+
         # 更新已建造的補給站數量，循環使用0-2
         self.depots_built = (self.depots_built + 1) % 3
+
+        # 避免放置在礦物和指揮中心中間 - 尋找替代位置
+        target = self._find_safe_building_position(unit_type, target)
+
         # 確保座標不超出畫面邊界 (0-83)
         return (np.clip(target[0], 0, 83), np.clip(target[1], 0, 83))
 
@@ -492,6 +724,125 @@ class ProductionAI:
         # 如果沒有找到瓦斯泉，則返回None
         return None
 
+    def _find_all_geysers(self, unit_type):
+        """
+        找到所有瓦斯泉的位置
+
+        這個方法用於找到地圖上所有瓦斯泉的精確位置，用於建造多個瓦斯廠。
+
+        參數:
+        - unit_type: 單位類型陣列，包含所有單位的類型信息
+
+        返回:
+        - 所有瓦斯泉的精確位置列表（x, y座標），或者空列表（如果沒有找到瓦斯泉）
+        """
+        # 獲取所有瓦斯泉的座標
+        y, x = (unit_type == GEYSER_ID).nonzero()
+        geysers = []
+
+        if x.any():
+            # 找到所有獨立的瓦斯泉
+            visited = set()
+            for i in range(len(x)):
+                if i not in visited:
+                    # 獲取當前瓦斯泉的座標
+                    ax, ay = x[i], y[i]
+                    # 建立遮罩只取當前瓦斯泉附近的像素
+                    mask = (np.abs(x - ax) < 10) & (np.abs(y - ay) < 10)
+                    if mask.any():
+                        # 計算這個瓦斯泉的平均位置
+                        geyser_pos = (int(x[mask].mean()), int(y[mask].mean()))
+                        geysers.append(geyser_pos)
+                        # 標記這個瓦斯泉的所有像素為已訪問
+                        visited.update(np.where(mask)[0])
+
+        return geysers
+
+    def _assign_gas_workers_if_needed(self, obs, unit_type):
+        """
+        自動分配瓦斯工人到所有瓦斯廠
+
+        這個方法定期檢查所有瓦斯廠並分配工人，確保每個瓦斯廠都有足夠的工人。
+
+        參數:
+        - obs: 當前遊戲觀察狀態
+        - unit_type: 單位類型陣列
+        """
+        player = obs.observation.player
+        available = obs.observation.available_actions
+
+        # 計算當前瓦斯廠數量
+        refinery_pixels = np.sum(unit_type == REFINERY_ID)
+        refinery_count = int(refinery_pixels / 80)  # 80 像素約為一個建築大小
+
+        if refinery_count > 0 and self.refinery_targets:
+            # 計算每個瓦斯廠需要的工人數量
+            max_gas_allowed = refinery_count * 3
+
+            # 計算當前實際在採集瓦斯的工兵數量
+            gas_workers_actual = 0
+            scv_y, scv_x = (unit_type == SCV_ID).nonzero()
+            if scv_x.any() and scv_y.any():
+                for refinery_target in self.refinery_targets:
+                    if refinery_target:
+                        distances = np.sqrt((scv_x - refinery_target[0])**2 + (scv_y - refinery_target[1])**2)
+                        gas_workers_actual += np.sum(distances < 10)
+
+            # 如果瓦斯工兵數量不足，嘗試分配更多工人
+            if gas_workers_actual < max_gas_allowed and actions.FUNCTIONS.Harvest_Gather_screen.id in available:
+                # 找到工人最少的瓦斯廠
+                min_workers = float('inf')
+                target_refinery = None
+
+                for refinery_target in self.refinery_targets:
+                    if refinery_target:
+                        distances = np.sqrt((scv_x - refinery_target[0])**2 + (scv_y - refinery_target[1])**2)
+                        workers_here = np.sum(distances < 10)
+                        if workers_here < min_workers:
+                            min_workers = workers_here
+                            target_refinery = refinery_target
+
+                if target_refinery:
+                    # 選擇遠離目標的SCV以避免干擾正在採氣的工兵
+                    y, x = (unit_type == SCV_ID).nonzero()
+                    if x.any() and target_refinery:
+                        dist = np.sqrt((x - target_refinery[0])**2 + (y - target_refinery[1])**2)
+                        mask = dist > 15
+                        if mask.any():
+                            valid_indices = np.where(mask)[0]
+                            idx = random.choice(valid_indices)
+                            # 直接嘗試採集瓦斯
+                            return actions.FUNCTIONS.Harvest_Gather_screen("now", target_refinery)
+
+    def _get_next_camera_position_for_geysers(self):
+        """
+        獲取下一個相機位置來尋找瓦斯泉
+
+        這個方法返回預定義的相機位置，用於系統地搜索地圖上的瓦斯泉。
+
+        返回:
+        - 下一個相機位置（x, y座標），或者None如果所有位置都已嘗試
+        """
+        # 預定義的相機位置，覆蓋地圖的不同區域
+        camera_positions = [
+            (10, 50),  # 左下
+            (50, 10),  # 右下
+            (10, 10),  # 左上
+            (50, 50),  # 右上
+            (30, 30),  # 中間
+        ]
+
+        # 返回下一個未嘗試的位置
+        for pos in camera_positions:
+            pos_key = f"{pos[0]}_{pos[1]}"
+            if pos_key not in self.attempted_geyser_positions:
+                self.attempted_geyser_positions.add(pos_key)
+                return pos
+
+        # 所有位置都已嘗試，重置並返回第一個位置
+        self.attempted_geyser_positions.clear()
+        return camera_positions[0]
+
 # =========================================================
 # 🎮 主程式啟動器 (專注於生產五隻掠奪者)
 # 這個函數是整個程式的入口點，負責:
@@ -546,6 +897,8 @@ def main(argv):
                 agent.marauders_produced = 0
                 agent.marauder_production_complete = False
                 agent.gas_workers_assigned = 0
+                agent.refinery_targets = []  # 重置瓦斯廠目標列表，確保每局都會重新建造瓦斯廠
+                agent.attempted_geyser_positions = set()  # 重置瓦斯泉尋找狀態
 
                 # 遊戲主循環，每次迭代執行一個動作
                 while True:
