@@ -30,3 +30,5 @@ deactivate #退出環境
 python train_ppo.py ＃不用理他
 python pvt_agent_basic.py  # 執行杜明道的腳本的指令
 python pvt_agent_fight.py  # 執行楊以振的腳本的指令
+
+git reset --hard origin/main #git強制同步
