@@ -6,5 +6,5 @@ my_agent/pvt_agent_fight.py
 
 __pycache__/
 log/*
-
+logs/*
 !log/dqn_model.pth
