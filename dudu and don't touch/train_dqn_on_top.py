@@ -15,7 +15,7 @@ import production_ai
 from production_ai import ProductionAI
 
 # =========================================================
-# 🐒 猴子補丁：確保路徑正確與解決右下角建築空間 Bug
+# 🐒 猴子補丁與路徑設定
 # =========================================================
 current_dir = os.path.dirname(os.path.abspath(__file__))
 log_dir = os.path.join(current_dir, "log")
@@ -27,18 +27,10 @@ def patched_data_collector_init(self):
         writer = csv.writer(file)
         writer.writerow(["Game_Loop", "Minerals", "Vespene", "Workers", "Ideal", "Action_ID"])
 
-def patched_calc_barracks_pos(self, obs):
-    player_relative = obs.observation.feature_minimap[features.MINIMAP_FEATURES.player_relative.index]
-    _, x_mini = (player_relative == 1).nonzero()
-    is_on_right_side = (x_mini.mean() if x_mini.any() else 0) > 32
-    target_x = self.cc_x_screen - 25 if is_on_right_side else self.cc_x_screen + 25
-    return (np.clip(target_x, 10, 70), np.clip(self.cc_y_screen - 15, 10, 70))
-
 production_ai.DataCollector.__init__ = patched_data_collector_init
-production_ai.ProductionAI._calc_barracks_pos = patched_calc_barracks_pos
 
 # =========================================================
-# 📊 訓練紀錄器
+# 📊 訓練紀錄器 (已修正參數數量與整數轉換)
 # =========================================================
 class TrainingLogger:
     def __init__(self):
@@ -46,17 +38,20 @@ class TrainingLogger:
         self.filename = os.path.join(log_dir, f"dqn_training_log_{int(time.time())}.csv")
         with open(self.filename, mode='w', newline='') as file:
             writer = csv.writer(file)
-            writer.writerow(["Episode", "Total_Reward", "Marauders", "End_Loop", "Reason"])
+            writer.writerow(["Episode", "Total_Reward", "Marauders", "End_Loop", "Reason", "Is_Bottom_Right"])
 
-    def log_episode(self, ep, reward, marauders, loop, reason):
-        # ⭐ 修正點：確保 reward 是純數字，防止 numpy 報錯
+    def log_episode(self, ep, reward, m_cnt, loop, reason, location):
+        """ 紀錄每回合摘要，將獎勵轉為整數 """
+        # 確保獎勵是純數字並轉換為整數
         if hasattr(reward, "item"): 
-            reward = reward.item() # 如果是 numpy 格式，轉換成純數字
+            reward = reward.item()
+        int_reward = int(reward) 
         
         with open(self.filename, mode='a', newline='') as file:
             writer = csv.writer(file)
-            writer.writerow([ep, round(float(reward), 2), marauders, loop, reason])
-
+            # 使用與傳入參數一致的變數名稱
+            writer.writerow([ep, int_reward, m_cnt, loop, reason, location])
+            
 # =========================================================
 # 🧠 深度學習模型 (DQN)
 # =========================================================
@@ -78,9 +73,9 @@ def main(argv):
     state_size = 10; action_size = 10
     
     brain_model = QNetwork(state_size, action_size)
-    optimizer = optim.Adam(brain_model.parameters(), lr=0.0005) # 穩定學習率
+    optimizer = optim.Adam(brain_model.parameters(), lr=0.0005) 
     criterion = nn.MSELoss()
-    memory = deque(maxlen=10000) # ⭐ 大容量長期記憶區
+    memory = deque(maxlen=10000) 
     logger = TrainingLogger()
     
     model_path = os.path.join(log_dir, "dqn_model.pth")
@@ -106,9 +101,9 @@ def main(argv):
             
             while True:
                 obs = obs_list[0]
-                curr_loop = obs.observation.game_loop
+                curr_loop = int(obs.observation.game_loop)
                 
-                # 1. 提取狀態 (轉為 list 確保存儲格式統一)
+                # 1. 提取狀態
                 unit_type = obs.observation.feature_screen[features.SCREEN_FEATURES.unit_type.index]
                 b_cnt = np.sum(unit_type == 21); r_cnt = np.sum(unit_type == 20)
                 t_cnt = np.sum(unit_type == 37); m_cnt = int(np.sum(unit_type == 51) / 20)
@@ -118,7 +113,8 @@ def main(argv):
                     obs.observation.player.food_used / 50, b_cnt, r_cnt, t_cnt, m_cnt / 10,
                     0, 0, 1.0
                 ]
-                state_t = torch.FloatTensor(state)
+                # 優化：先轉 numpy 陣列再轉 Tensor
+                state_t = torch.FloatTensor(np.array(state))
 
                 # 2. 選擇動作
                 if random.random() <= epsilon:
@@ -126,22 +122,21 @@ def main(argv):
                 else:
                     with torch.no_grad(): a_id = torch.argmax(brain_model(state_t.unsqueeze(0))).item()
 
-                # 3. 執行動作 (沙包對手模式)
+                # 3. 執行動作
                 sc2_action = hands.get_action(obs, a_id)
                 obs_list = env.step([sc2_action, actions.FUNCTIONS.no_op()])
                 
-                # 4. 計算強化版獎勵 (防止洗分 + 全過獎金)
+                # 4. 獎勵邏輯 (維持原有架構)
                 step_reward = -0.01 
                 if r_cnt > last_r and r_cnt <= 2: step_reward += 15.0; last_r = r_cnt
                 if b_cnt > last_b and b_cnt <= 2: step_reward += 20.0; last_b = b_cnt
                 if t_cnt > last_t: step_reward += 40.0; last_t = t_cnt
                 if m_cnt > last_m:
                     step_reward += 150.0; last_m = m_cnt
-                    if m_cnt >= 5: # 第 5 隻大紅包
-                        step_reward += (500.0 + (13440 - curr_loop) / 100)
+                    if m_cnt >= 5: step_reward += 500.0
                 total_reward += step_reward
 
-                # 5. 提取下一個狀態並存入記憶 (統一轉為 list 避免 shape 錯誤)
+                # 5. 提取下一個狀態並存入記憶
                 next_obs = obs_list[0]
                 next_unit = next_obs.observation.feature_screen[features.SCREEN_FEATURES.unit_type.index]
                 next_state = [
@@ -151,38 +146,46 @@ def main(argv):
                     0, 0, 1.0
                 ]
                 
-                done = next_obs.last() or m_cnt >= 5 or curr_loop >= 13440
-                # ⭐ 關鍵修正：存入 list 而非 tensor，解決 inhomogeneous shape 問題
-                memory.append((state, a_id, step_reward, next_state, done))
+                done = bool(next_obs.last() or m_cnt >= 5 or curr_loop >= 13440)
+                # 存入記憶時強制轉換類型
+                memory.append((state, int(a_id), float(step_reward), next_state, bool(done)))
 
-                # 🧠 高效批量學習
+                # --- 🧠 模型學習部分的修正 ---
                 if len(memory) > 128:
                     batch = random.sample(memory, 64)
                     b_states, b_actions, b_rewards, b_next_states, b_dones = zip(*batch)
                     
-                    # 使用 np.array() 中轉，這是最穩定的格式轉換方法
-                    b_states_t = torch.tensor(np.array(b_states), dtype=torch.float)
-                    b_next_states_t = torch.tensor(np.array(b_next_states), dtype=torch.float)
-                    b_actions_t = torch.tensor(np.array(b_actions), dtype=torch.long)
-                    b_rewards_t = torch.tensor(np.array(b_rewards), dtype=torch.float)
-                    b_dones_t = torch.tensor(np.array(b_dones), dtype=torch.bool)
+                    # 使用 torch.as_tensor 或先轉為 float 類型的 numpy 陣列
+                    b_states_t = torch.as_tensor(np.array(b_states), dtype=torch.float32)
+                    b_next_states_t = torch.as_tensor(np.array(b_next_states), dtype=torch.float32)
+                    b_actions_t = torch.as_tensor(b_actions, dtype=torch.long)
+                    b_rewards_t = torch.as_tensor(b_rewards, dtype=torch.float32)
+                    
+                    # 這裡最關鍵：先轉成 float 的 numpy 陣列，再轉 Tensor
+                    b_dones_t = torch.as_tensor(np.array(b_dones, dtype=np.float32))
 
                     with torch.no_grad():
+                        # 使用 .max(1)[0] 確保 Q 值維度正確
                         next_q = brain_model(b_next_states_t).max(1)[0]
-                        targets = b_rewards_t + (~b_dones_t).float() * gamma * next_q
+                        targets = b_rewards_t + (1 - b_dones_t) * gamma * next_q
                     
                     current_q = brain_model(b_states_t).gather(1, b_actions_t.unsqueeze(1)).squeeze(1)
                     loss = criterion(current_q, targets)
                     optimizer.zero_grad(); loss.backward(); optimizer.step()
 
                 if done:
+                    # 讀取出生點狀態
+                    loc_text = (production_ai.BASE_LOCATION_CODE == 1)
                     reason = "Target_Reached" if m_cnt >= 5 else "Timeout"
-                    logger.log_episode(ep+1, total_reward, m_cnt, curr_loop, reason)
-                    # 修正後的 print 語句
-                    print(f"回合結束 | 產量: {int(m_cnt)} | 總分: {float(total_reward):.2f}")
+                    
+                    # 傳入 6 個參數給紀錄器
+                    logger.log_episode(ep+1, total_reward, m_cnt, curr_loop, reason, loc_text)
+                    
+                    # 終端機顯示同樣轉為整數
+                    print(f"回合結束 | 出生點右下: {loc_text} ({production_ai.BASE_LOCATION_CODE}) | "
+                        f"產量: {int(m_cnt)} | 總分: {int(total_reward)}")
                     break
             
-            # 回合間更新
             epsilon = max(0.15, epsilon * epsilon_decay)
             torch.save(brain_model.state_dict(), model_path)
 
