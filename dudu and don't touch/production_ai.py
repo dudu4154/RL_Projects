@@ -203,11 +203,24 @@ class ProductionAI:
         return (np.clip(target[0], 0, 83), np.clip(target[1], 0, 83))
 
     def _calc_barracks_pos(self, obs):
-        """ 根據出生點自動判斷兵營位移 """
+        """ 修正版：根據指揮中心位置動態計算兵營座標，確保右側空間 """
         player_relative = obs.observation.feature_minimap[features.MINIMAP_FEATURES.player_relative.index]
         _, x_mini = (player_relative == 1).nonzero()
-        offset_x = -30 if (x_mini.mean() if x_mini.any() else 0) > 32 else 30
-        return (np.clip(42 + offset_x, 0, 83), 42)
+        
+        # 判斷基地在左側還是右側
+        is_on_right_side = (x_mini.mean() if x_mini.any() else 0) > 32
+        
+        if is_on_right_side:
+            # 如果基地在右側，兵營要往左偏，留出右邊空間給科技實驗室
+            target_x = self.cc_x_screen - 20
+            target_y = self.cc_y_screen - 15  # 往上一點點避開礦區
+        else:
+            # 如果基地在左側，兵營往右偏，但不能太遠
+            target_x = self.cc_x_screen + 20
+            target_y = self.cc_y_screen - 15
+
+        # 確保座標在安全範圍內 (0-83)
+        return (np.clip(target_x, 10, 70), np.clip(target_y, 10, 70))
 
     def _find_geyser(self, unit_type):
         """ 局部像素遮罩：精確鎖定單一湧泉中心 """
@@ -227,7 +240,7 @@ def main(argv):
     with sc2_env.SC2Env(
         map_name="Simple64",
         players=[sc2_env.Agent(sc2_env.Race.terran), 
-                 sc2_env.Bot(sc2_env.Race.zerg, sc2_env.Difficulty.easy)],
+                 sc2_env.Agent(sc2_env.Race.terran)],
         agent_interface_format=sc2_env.AgentInterfaceFormat(
             feature_dimensions=sc2_env.Dimensions(screen=84, minimap=64),
             use_raw_units=False),
