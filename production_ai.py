@@ -227,7 +227,7 @@ def main(argv):
     with sc2_env.SC2Env(
         map_name="Simple64",
         players=[sc2_env.Agent(sc2_env.Race.terran), 
-                 sc2_env.Bot(sc2_env.Race.zerg, sc2_env.Difficulty.easy)],
+                 sc2_env.Agent(sc2_env.Race.terran)],
         agent_interface_format=sc2_env.AgentInterfaceFormat(
             feature_dimensions=sc2_env.Dimensions(screen=84, minimap=64),
             use_raw_units=False),
