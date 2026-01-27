@@ -1,0 +1,14 @@
+Episode,Total_Reward,Marauders,End_Loop,Reason
+1,150.79,0,[13440],Timeout
+2,150.79,0,[13440],Timeout
+3,405.79,2,[13440],Timeout
+4,230.79,0,[13440],Timeout
+5,610.79,0,[13440],Timeout
+6,335.79,1,[13440],Timeout
+7,70.79,0,[13440],Timeout
+8,470.79,0,[13440],Timeout
+9,180.79,0,[13440],Timeout
+10,260.79,1,[13440],Timeout
+11,780.79,4,[13440],Timeout
+12,170.79,0,[13440],Timeout
+13,822.35,5,[8448],Finished
