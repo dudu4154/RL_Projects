@@ -17,6 +17,7 @@ SCV_ID = 45
 MARAUDER_ID = 51
 MINERAL_FIELD_ID = 341
 GEYSER_ID = 342
+BASE_LOCATION_CODE = 0
 
 # =========================================================
 # 📊 數據收集器: 紀錄資源與訓練狀態
@@ -63,17 +64,27 @@ class ProductionAI:
         player = obs.observation.player
         available = obs.observation.available_actions
 
-        # --- 1. 座標與防禦型掃描點初始化 ---
+        # --- 1. 座標與防禦型掃描點初始化 (在這裡加入判斷) ---
         if self.base_minimap_coords is None:
+            global BASE_LOCATION_CODE  # 宣告使用全域變數
+            
             player_relative_mini = obs.observation.feature_minimap[features.MINIMAP_FEATURES.player_relative.index]
             y_mini, x_mini = (player_relative_mini == features.PlayerRelative.SELF).nonzero()
+            
             if x_mini.any():
                 bx, by = int(x_mini.mean()), int(y_mini.mean())
                 self.base_minimap_coords = (bx, by)
+                
+                # 【新增】在這裡直接判斷並寫入全域變數
+                # bx > 32 (右側) 且 by > 32 (下側) = 右下角
+                if bx > 32 and by > 32:
+                    BASE_LOCATION_CODE = 1
+                else:
+                    BASE_LOCATION_CODE = 0
+                
                 # 以基地為中心擴散的掃描點
                 offsets = [(0, 0), (20, 0), (-20, 0), (0, 20), (0, -20), (15, 15), (-15, -15)]
                 self.scan_points = [(np.clip(bx + dx, 0, 63), np.clip(by + dy, 0, 63)) for dx, dy in offsets]
-
         # --- 2. 視角跳轉邏輯 (修正關鍵) ---
         cc_y, cc_x = (unit_type == COMMAND_CENTER_ID).nonzero()
         
@@ -204,24 +215,38 @@ class ProductionAI:
 
     def _calc_barracks_pos(self, obs):
         """ 修正版：根據指揮中心位置動態計算兵營座標，確保右側空間 """
+        global BASE_LOCATION_CODE  # 宣告使用全域變數
+        
         player_relative = obs.observation.feature_minimap[features.MINIMAP_FEATURES.player_relative.index]
-        _, x_mini = (player_relative == 1).nonzero()
+        y_mini, x_mini = (player_relative == 1).nonzero()
         
-        # 判斷基地在左側還是右側
-        is_on_right_side = (x_mini.mean() if x_mini.any() else 0) > 32
+        # 計算平均座標
+        bx = x_mini.mean() if x_mini.any() else 0
+        by = y_mini.mean() if y_mini.any() else 0
         
+        # 判斷位置
+        is_on_right_side = bx > 32
+        is_on_bottom_side = by > 32
+        
+        # --- 核心邏輯：如果是右下就變成 1 ---
+        if is_on_right_side and is_on_bottom_side:
+            BASE_LOCATION_CODE = 1
+        else:
+            BASE_LOCATION_CODE = 0
+            
+        # 原有的兵營座標計算邏輯
         if is_on_right_side:
             # 如果基地在右側，兵營要往左偏，留出右邊空間給科技實驗室
             target_x = self.cc_x_screen - 20
-            target_y = self.cc_y_screen - 15  # 往上一點點避開礦區
+            target_y = self.cc_y_screen - 15
         else:
-            # 如果基地在左側，兵營往右偏，但不能太遠
+            # 如果基地在左側，兵營往右偏
             target_x = self.cc_x_screen + 20
             target_y = self.cc_y_screen - 15
 
         # 確保座標在安全範圍內 (0-83)
         return (np.clip(target_x, 10, 70), np.clip(target_y, 10, 70))
-
+    
     def _find_geyser(self, unit_type):
         """ 局部像素遮罩：精確鎖定單一湧泉中心 """
         y, x = (unit_type == GEYSER_ID).nonzero()
