@@ -186,7 +186,7 @@ def main(argv):
                         f"產量: {int(m_cnt)} | 總分: {int(total_reward)}")
                     break
             
-            epsilon = max(0.15, epsilon * epsilon_decay)
+            epsilon = max(0.99, epsilon * epsilon_decay)
             torch.save(brain_model.state_dict(), model_path)
 
 if __name__ == "__main__":
