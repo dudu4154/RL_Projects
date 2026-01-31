@@ -38,20 +38,19 @@ class TrainingLogger:
         self.filename = os.path.join(log_dir, f"dqn_training_log_{int(time.time())}.csv")
         with open(self.filename, mode='w', newline='') as file:
             writer = csv.writer(file)
-            writer.writerow(["Episode", "Total_Reward", "Marauders", "End_Loop", "Reason", "Is_Bottom_Right"])
+            writer.writerow(["Episode", "Epsilon", "Total_Reward", "Marauders", "End_Loop", "Reason", "Is_Bottom_Right"])
 
-    def log_episode(self, ep, reward, m_cnt, loop, reason, location):
-        """ 紀錄每回合摘要，將獎勵轉為整數 """
-        # 確保獎勵是純數字並轉換為整數
+    def log_episode(self, ep, eps, reward, m_cnt, loop, reason, location):
+        """ 紀錄每回合摘要，加入 eps 參數 """
         if hasattr(reward, "item"): 
             reward = reward.item()
         int_reward = int(reward) 
         
         with open(self.filename, mode='a', newline='') as file:
             writer = csv.writer(file)
-            # 使用與傳入參數一致的變數名稱
-            writer.writerow([ep, int_reward, m_cnt, loop, reason, location])
-            
+            # 寫入數據時對應標題順序
+            writer.writerow([ep, f"{eps:.3f}", int_reward, m_cnt, loop, reason, location])
+
 # =========================================================
 # 🧠 深度學習模型 (DQN)
 # =========================================================
@@ -75,24 +74,25 @@ def main(argv):
     brain_model = QNetwork(state_size, action_size)
     optimizer = optim.Adam(brain_model.parameters(), lr=0.0005) 
     criterion = nn.MSELoss()
-    memory = deque(maxlen=10000) 
+    memory = deque(maxlen=100000) 
     logger = TrainingLogger()
+    learn_min = 0.01 # 這是你的 epsilon 最小值
     
     model_path = os.path.join(log_dir, "dqn_model.pth")
     if os.path.exists(model_path):
         brain_model.load_state_dict(torch.load(model_path))
         print("✅ 載入成功！接續之前的記憶繼續訓練...")
 
-    epsilon = 1.0; epsilon_decay = 0.995; gamma = 0.99 
+    epsilon = 1.0; epsilon_decay = 0.999; gamma = 0.99 
 
     with sc2_env.SC2Env(
         map_name="Simple64",
         players=[sc2_env.Agent(sc2_env.Race.terran), sc2_env.Agent(sc2_env.Race.terran)],
         agent_interface_format=sc2_env.AgentInterfaceFormat(
             feature_dimensions=sc2_env.Dimensions(screen=84, minimap=64), use_raw_units=False),
-        step_mul=32, realtime=False
+        step_mul=16, realtime=False
     ) as env:
-        for ep in range(200):
+        for ep in range(1000):
             hands = ProductionAI() 
             print(f"\n🚀 === 啟動第 {ep+1} 回合 (Epsilon: {epsilon:.3f}) ===")
             obs_list = env.reset()
@@ -151,7 +151,7 @@ def main(argv):
                 memory.append((state, int(a_id), float(step_reward), next_state, bool(done)))
 
                 # --- 🧠 模型學習部分的修正 ---
-                if len(memory) > 128:
+                if len(memory) > 256:
                     batch = random.sample(memory, 64)
                     b_states, b_actions, b_rewards, b_next_states, b_dones = zip(*batch)
                     
@@ -174,19 +174,18 @@ def main(argv):
                     optimizer.zero_grad(); loss.backward(); optimizer.step()
 
                 if done:
-                    # 讀取出生點狀態
                     loc_text = (production_ai.BASE_LOCATION_CODE == 1)
                     reason = "Target_Reached" if m_cnt >= 5 else "Timeout"
                     
-                    # 傳入 6 個參數給紀錄器
-                    logger.log_episode(ep+1, total_reward, m_cnt, curr_loop, reason, loc_text)
+                    # 修正 2: 傳入當前的 epsilon 給紀錄器 (放在第 2 個參數)
+                    logger.log_episode(ep+1, epsilon, total_reward, m_cnt, curr_loop, reason, loc_text)
                     
-                    # 終端機顯示同樣轉為整數
-                    print(f"回合結束 | 出生點右下: {loc_text} ({production_ai.BASE_LOCATION_CODE}) | "
+                    print(f"回合結束 | 好奇率: {epsilon:.3f} | 出生點右下: {loc_text} | "
                         f"產量: {int(m_cnt)} | 總分: {int(total_reward)}")
                     break
             
-            epsilon = max(0.99, epsilon * epsilon_decay)
+            # 回合結束後更新 epsilon
+            epsilon = max(learn_min, epsilon * epsilon_decay)
             torch.save(brain_model.state_dict(), model_path)
 
 if __name__ == "__main__":
