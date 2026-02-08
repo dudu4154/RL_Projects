@@ -50,19 +50,56 @@ class ProductionAI:
         self.cc_y_screen = 42
         self.gas_workers_assigned = 0
         
+        # --- 【修正】在這裡初始化參數，避免 AttributeError ---
+        self.active_parameter = 1 
+        
         # 鏡頭管理座標
         self.base_minimap_coords = None 
         self.scan_points = []
         self.current_scan_idx = 0
 
-    def get_action(self, obs, action_id):
-        """ 
-        0:無動作, 1:造SCV, 2:蓋補給站, 3:蓋瓦斯廠, 4:採瓦斯, 
-        5:蓋兵營, 6:研發科技, 7:造掠奪者, 8:擴散掃描, 9:擴張開礦
-        """
+    def _find_units_centers(self, unit_type, unit_id):
+        """ 尋找畫面上所有指定 ID 的建築中心點，避免點擊到空地 """
+        y, x = (unit_type == unit_id).nonzero()
+        if not x.any(): return []
+        
+        centers = []
+        # 簡單的聚類技巧：找第一個點及其周圍像素
+        temp_x, temp_y = list(x), list(y)
+        while temp_x:
+            bx, by = temp_x[0], temp_y[0]
+            mask = (np.abs(np.array(temp_x) - bx) < 12) & (np.abs(np.array(temp_y) - by) < 12)
+            centers.append((int(np.mean(np.array(temp_x)[mask])), int(np.mean(np.array(temp_y)[mask]))))
+            temp_x = [px for i, px in enumerate(temp_x) if not mask[i]]
+            temp_y = [py for i, py in enumerate(temp_y) if not mask[i]]
+        return centers
+
+    def get_action(self, obs, action_id, parameter=None):
+        # 1. 優先處理參數更新，確保後面計算 grid_pos 不會出錯
+        if parameter is not None:
+            self.active_parameter = parameter
+        
+        # 2. 計算 4x4 建築網格座標 (用於畫面 84x84)
+        b_id = self.active_parameter
+        row, col = (b_id - 1) // 4, (b_id - 1) % 4
+        jitter_range = 8  # 在 21 像素的範圍內，上下左右偏移 8 像素
+        offset_x = random.randint(-jitter_range, jitter_range)
+        offset_y = random.randint(-jitter_range, jitter_range)
+
+        grid_pos = (
+            np.clip(int((col + 0.5) * 21) + offset_x, 0, 83),
+            np.clip(int((row + 0.5) * 21) + offset_y, 0, 83)
+        )
+
         unit_type = obs.observation.feature_screen[features.SCREEN_FEATURES.unit_type.index]
         player = obs.observation.player
         available = obs.observation.available_actions
+
+        # --- 更新通用參數暫存區 ---
+        if parameter is not None:
+            self.active_parameter = parameter
+        elif not hasattr(self, 'active_parameter'):
+            self.active_parameter = 1 # 初始預設值
 
         # --- 1. 座標與防禦型掃描點初始化 (在這裡加入判斷) ---
         if self.base_minimap_coords is None:
@@ -118,10 +155,10 @@ class ProductionAI:
             return self._select_unit(unit_type, COMMAND_CENTER_ID)
 
         # [Action 2] 建造補給站 (三角形排列邏輯)
+        # [Action 2] 建造補給站
         elif action_id == 2:
             if player.minerals >= 100 and actions.FUNCTIONS.Build_SupplyDepot_screen.id in available:
-                target = self._calc_depot_pos()
-                return actions.FUNCTIONS.Build_SupplyDepot_screen("now", target)
+                return actions.FUNCTIONS.Build_SupplyDepot_screen("now", grid_pos)
             return self._select_scv(unit_type)
 
         # [Action 3] 建造瓦斯廠 (精確中心鎖定)
@@ -145,10 +182,9 @@ class ProductionAI:
         # [Action 5] 建造兵營 (自動位移邏輯)
         elif action_id == 5:
             if player.minerals >= 150 and actions.FUNCTIONS.Build_Barracks_screen.id in available:
-                target = self._calc_barracks_pos(obs)
-                return actions.FUNCTIONS.Build_Barracks_screen("now", target)
+                return actions.FUNCTIONS.Build_Barracks_screen("now", grid_pos)
             return self._select_scv(unit_type)
-
+        
         # [Action 6] 研發科技實驗室 (造掠奪者必備)
         elif action_id == 6:
             if player.minerals >= 50 and player.vespene >= 25:
@@ -158,10 +194,13 @@ class ProductionAI:
 
         # [Action 7] 訓練掠奪者
         elif action_id == 7:
-            if player.minerals >= 100 and player.vespene >= 25:
+            barracks_list = self._find_units_centers(unit_type, BARRACKS_ID)
+            if barracks_list:
                 if actions.FUNCTIONS.Train_Marauder_quick.id in available:
                     return actions.FUNCTIONS.Train_Marauder_quick("now")
-            return self._select_unit(unit_type, BARRACKS_ID)
+                # 點擊畫面上的第一個兵營
+                return actions.FUNCTIONS.select_point("select", barracks_list[0])
+            return actions.FUNCTIONS.no_op()
 
         # [Action 8] 中心擴散掃描 (偵察周邊)
         elif action_id == 8:
@@ -169,11 +208,25 @@ class ProductionAI:
             self.current_scan_idx = (self.current_scan_idx + 1) % len(self.scan_points)
             return actions.FUNCTIONS.move_camera(target)
 
-        # [Action 9] 在視角中心建造二礦
+        # [Action 9] 在視角選定網格建造二礦 (取代原先寫死的 42, 42)
         elif action_id == 9:
             if player.minerals >= 400 and actions.FUNCTIONS.Build_CommandCenter_screen.id in available:
-                return actions.FUNCTIONS.Build_CommandCenter_screen("now", (42, 42))
+                return actions.FUNCTIONS.Build_CommandCenter_screen("now", grid_pos)
             return self._select_scv(unit_type)
+        
+        elif action_id == 40:
+        # 使用剛剛存入的 active_parameter (1-16)
+            block_id = self.active_parameter
+            
+            # 4x4 網格計算邏輯
+            row = (block_id - 1) // 4
+            col = (block_id - 1) % 4
+            target_x = int((col + 0.5) * 16)
+            target_y = int((row + 0.5) * 16)
+            
+            final_pos = (np.clip(target_x, 0, 63), np.clip(target_y, 0, 63))
+            # print(f"[Action 40] 視角切換至網格 {block_id}: {final_pos}")
+            return actions.FUNCTIONS.move_camera(final_pos)
 
         return actions.FUNCTIONS.no_op()
 
@@ -277,8 +330,9 @@ def main(argv):
             obs_list = env.reset()
             while True:
                 # 隨機選擇動作測試 (0-9)
-                action_id = random.randint(0, 9)
-                sc2_action = agent.get_action(obs_list[0], action_id)
+                action_id = 2#random.randint(0, 9)
+                param = random.randint(1, 16) 
+                sc2_action = agent.get_action(obs_list[0], action_id, parameter=param)
                 obs_list = env.step([sc2_action])
                 if obs_list[0].last():
                     break

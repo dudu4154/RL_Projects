@@ -17,6 +17,7 @@ SCV_ID = 45
 MARAUDER_ID = 51
 MINERAL_FIELD_ID = 341
 GEYSER_ID = 342
+BASE_LOCATION_CODE = 0
 
 # =========================================================
 # 📊 數據收集器: 紀錄資源與訓練狀態
@@ -49,31 +50,57 @@ class ProductionAI:
         self.cc_y_screen = 42
         self.gas_workers_assigned = 0
         
+        # --- 【修正】在這裡初始化參數，避免 AttributeError ---
+        self.active_parameter = 1 
+        
         # 鏡頭管理座標
         self.base_minimap_coords = None 
         self.scan_points = []
         self.current_scan_idx = 0
 
-    def get_action(self, obs, action_id):
-        """ 
-        0:無動作, 1:造SCV, 2:蓋補給站, 3:蓋瓦斯廠, 4:採瓦斯, 
-        5:蓋兵營, 6:研發科技, 7:造掠奪者, 8:擴散掃描, 9:擴張開礦
-        """
+    def get_action(self, obs, action_id, parameter=None):
+        # --- 1. 更新通用參數暫存區 (移到最上方) ---
+        if parameter is not None:
+            self.active_parameter = parameter
+
+        # --- 2. 計算 4x4 建築網格座標 (畫面 84x84) ---
+        block_id = self.active_parameter 
+        row = (block_id - 1) // 4
+        col = (block_id - 1) % 4
+        # 畫面解析度 84，切 4 塊每塊 21 像素
+        grid_pos = (int((col + 0.5) * 21), int((row + 0.5) * 21))
+
         unit_type = obs.observation.feature_screen[features.SCREEN_FEATURES.unit_type.index]
         player = obs.observation.player
         available = obs.observation.available_actions
 
-        # --- 1. 座標與防禦型掃描點初始化 ---
+        # --- 更新通用參數暫存區 ---
+        if parameter is not None:
+            self.active_parameter = parameter
+        elif not hasattr(self, 'active_parameter'):
+            self.active_parameter = 1 # 初始預設值
+
+        # --- 1. 座標與防禦型掃描點初始化 (在這裡加入判斷) ---
         if self.base_minimap_coords is None:
+            global BASE_LOCATION_CODE  # 宣告使用全域變數
+            
             player_relative_mini = obs.observation.feature_minimap[features.MINIMAP_FEATURES.player_relative.index]
             y_mini, x_mini = (player_relative_mini == features.PlayerRelative.SELF).nonzero()
+            
             if x_mini.any():
                 bx, by = int(x_mini.mean()), int(y_mini.mean())
                 self.base_minimap_coords = (bx, by)
+                
+                # 【新增】在這裡直接判斷並寫入全域變數
+                # bx > 32 (右側) 且 by > 32 (下側) = 右下角
+                if bx > 32 and by > 32:
+                    BASE_LOCATION_CODE = 1
+                else:
+                    BASE_LOCATION_CODE = 0
+                
                 # 以基地為中心擴散的掃描點
                 offsets = [(0, 0), (20, 0), (-20, 0), (0, 20), (0, -20), (15, 15), (-15, -15)]
                 self.scan_points = [(np.clip(bx + dx, 0, 63), np.clip(by + dy, 0, 63)) for dx, dy in offsets]
-
         # --- 2. 視角跳轉邏輯 (修正關鍵) ---
         cc_y, cc_x = (unit_type == COMMAND_CENTER_ID).nonzero()
         
@@ -107,10 +134,10 @@ class ProductionAI:
             return self._select_unit(unit_type, COMMAND_CENTER_ID)
 
         # [Action 2] 建造補給站 (三角形排列邏輯)
+        # [Action 2] 建造補給站
         elif action_id == 2:
             if player.minerals >= 100 and actions.FUNCTIONS.Build_SupplyDepot_screen.id in available:
-                target = self._calc_depot_pos()
-                return actions.FUNCTIONS.Build_SupplyDepot_screen("now", target)
+                return actions.FUNCTIONS.Build_SupplyDepot_screen("now", grid_pos)
             return self._select_scv(unit_type)
 
         # [Action 3] 建造瓦斯廠 (精確中心鎖定)
@@ -134,10 +161,9 @@ class ProductionAI:
         # [Action 5] 建造兵營 (自動位移邏輯)
         elif action_id == 5:
             if player.minerals >= 150 and actions.FUNCTIONS.Build_Barracks_screen.id in available:
-                target = self._calc_barracks_pos(obs)
-                return actions.FUNCTIONS.Build_Barracks_screen("now", target)
+                return actions.FUNCTIONS.Build_Barracks_screen("now", grid_pos)
             return self._select_scv(unit_type)
-
+        
         # [Action 6] 研發科技實驗室 (造掠奪者必備)
         elif action_id == 6:
             if player.minerals >= 50 and player.vespene >= 25:
@@ -163,6 +189,20 @@ class ProductionAI:
             if player.minerals >= 400 and actions.FUNCTIONS.Build_CommandCenter_screen.id in available:
                 return actions.FUNCTIONS.Build_CommandCenter_screen("now", (42, 42))
             return self._select_scv(unit_type)
+        
+        elif action_id == 40:
+        # 使用剛剛存入的 active_parameter (1-16)
+            block_id = self.active_parameter
+            
+            # 4x4 網格計算邏輯
+            row = (block_id - 1) // 4
+            col = (block_id - 1) % 4
+            target_x = int((col + 0.5) * 16)
+            target_y = int((row + 0.5) * 16)
+            
+            final_pos = (np.clip(target_x, 0, 63), np.clip(target_y, 0, 63))
+            # print(f"[Action 40] 視角切換至網格 {block_id}: {final_pos}")
+            return actions.FUNCTIONS.move_camera(final_pos)
 
         return actions.FUNCTIONS.no_op()
 
@@ -203,12 +243,39 @@ class ProductionAI:
         return (np.clip(target[0], 0, 83), np.clip(target[1], 0, 83))
 
     def _calc_barracks_pos(self, obs):
-        """ 根據出生點自動判斷兵營位移 """
+        """ 修正版：根據指揮中心位置動態計算兵營座標，確保右側空間 """
+        global BASE_LOCATION_CODE  # 宣告使用全域變數
+        
         player_relative = obs.observation.feature_minimap[features.MINIMAP_FEATURES.player_relative.index]
-        _, x_mini = (player_relative == 1).nonzero()
-        offset_x = -30 if (x_mini.mean() if x_mini.any() else 0) > 32 else 30
-        return (np.clip(42 + offset_x, 0, 83), 42)
+        y_mini, x_mini = (player_relative == 1).nonzero()
+        
+        # 計算平均座標
+        bx = x_mini.mean() if x_mini.any() else 0
+        by = y_mini.mean() if y_mini.any() else 0
+        
+        # 判斷位置
+        is_on_right_side = bx > 32
+        is_on_bottom_side = by > 32
+        
+        # --- 核心邏輯：如果是右下就變成 1 ---
+        if is_on_right_side and is_on_bottom_side:
+            BASE_LOCATION_CODE = 1
+        else:
+            BASE_LOCATION_CODE = 0
+            
+        # 原有的兵營座標計算邏輯
+        if is_on_right_side:
+            # 如果基地在右側，兵營要往左偏，留出右邊空間給科技實驗室
+            target_x = self.cc_x_screen - 20
+            target_y = self.cc_y_screen - 15
+        else:
+            # 如果基地在左側，兵營往右偏
+            target_x = self.cc_x_screen + 20
+            target_y = self.cc_y_screen - 15
 
+        # 確保座標在安全範圍內 (0-83)
+        return (np.clip(target_x, 10, 70), np.clip(target_y, 10, 70))
+    
     def _find_geyser(self, unit_type):
         """ 局部像素遮罩：精確鎖定單一湧泉中心 """
         y, x = (unit_type == GEYSER_ID).nonzero()
@@ -240,7 +307,8 @@ def main(argv):
             while True:
                 # 隨機選擇動作測試 (0-9)
                 action_id = random.randint(0, 9)
-                sc2_action = agent.get_action(obs_list[0], action_id)
+                param = random.randint(1, 16) 
+                sc2_action = agent.get_action(obs_list[0], action_id, parameter=param)
                 obs_list = env.step([sc2_action])
                 if obs_list[0].last():
                     break

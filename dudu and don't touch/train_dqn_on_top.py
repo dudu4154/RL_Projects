@@ -55,21 +55,28 @@ class TrainingLogger:
 # 🧠 深度學習模型 (DQN)
 # =========================================================
 class QNetwork(nn.Module):
-    def __init__(self, state_size, action_size):
+    def __init__(self, state_size, action_size, param_size=16):
         super(QNetwork, self).__init__()
-        self.fc = nn.Sequential(
+        self.common = nn.Sequential(
             nn.Linear(state_size, 128), nn.ReLU(),
-            nn.Linear(128, 64), nn.ReLU(),
-            nn.Linear(64, action_size)
+            nn.Linear(128, 64), nn.ReLU()
         )
-    def forward(self, x): return self.fc(x)
+        # 動作頭：決定執行哪個 Action (0-9, 40)
+        self.action_head = nn.Linear(64, action_size)
+        # 參數頭：決定目標網格 (1-16)
+        self.param_head = nn.Linear(64, param_size)
+
+    def forward(self, x):
+        x = self.common(x)
+        return self.action_head(x), self.param_head(x) # 同時回傳兩組 Q 值
 
 # =========================================================
 # 🎮 訓練主程式
 # =========================================================
 def main(argv):
     del argv
-    state_size = 10; action_size = 10
+    state_size = 11 # 增加一格狀態紀錄「目前看哪」
+    action_size = 41
     
     brain_model = QNetwork(state_size, action_size)
     optimizer = optim.Adam(brain_model.parameters(), lr=0.0005) 
@@ -92,7 +99,7 @@ def main(argv):
             feature_dimensions=sc2_env.Dimensions(screen=84, minimap=64), use_raw_units=False),
         step_mul=16, realtime=False
     ) as env:
-        for ep in range(1000):
+        for ep in range(100):
             hands = ProductionAI() 
             print(f"\n🚀 === 啟動第 {ep+1} 回合 (Epsilon: {epsilon:.3f}) ===")
             obs_list = env.reset()
@@ -101,87 +108,134 @@ def main(argv):
             
             while True:
                 obs = obs_list[0]
-                curr_loop = int(obs.observation.game_loop)
+                player = obs.observation.player # 新增：提取 player 資訊
+                current_workers = player.food_workers # 
+                minimap_unit_type = obs.observation.feature_minimap[features.MINIMAP_FEATURES.unit_type.index]
                 
-                # 1. 提取狀態
+                # --- 【修正 1】 提取必要變數 ---
                 unit_type = obs.observation.feature_screen[features.SCREEN_FEATURES.unit_type.index]
-                b_cnt = np.sum(unit_type == 21); r_cnt = np.sum(unit_type == 20)
-                t_cnt = np.sum(unit_type == 37); m_cnt = int(np.sum(unit_type == 51) / 20)
+                r_cnt = np.sum(unit_type == 20)  
+                b_cnt = np.sum(unit_type == 21)  
+                t_cnt = np.sum(unit_type == 37)  
+                m_cnt = int(np.sum(unit_type == 51) / 20) 
+                curr_loop = obs.observation.game_loop[0]
+                # 在小地圖中，建築物也會以對應的 ID 顯示
+                global_b_cnt = np.sum(minimap_unit_type == production_ai.BARRACKS_ID) 
+                global_r_cnt = np.sum(minimap_unit_type == production_ai.REFINERY_ID)
+                global_t_cnt = np.sum(minimap_unit_type == production_ai.BARRACKS_TECHLAB_ID)
                 
+                # 偵測當前畫面 (Screen) 是否有建築，這能幫助 AI 學習「移動視角」的必要性
+                screen_unit = obs.observation.feature_screen[features.SCREEN_FEATURES.unit_type.index]
+                screen_b_cnt = np.sum(screen_unit == production_ai.BARRACKS_ID)
+
+                # 提取狀態 (確保 current_workers 與 player 已定義)
+                current_block = getattr(hands, 'active_parameter', 1)
                 state = [
-                    obs.observation.player.minerals / 1000, obs.observation.player.vespene / 500,
-                    obs.observation.player.food_used / 50, b_cnt, r_cnt, t_cnt, m_cnt / 10,
-                    0, 0, 1.0
+                    current_workers / 16,
+                    player.minerals / 1000,
+                    player.vespene / 500,
+                    player.food_used / 50,
+                    global_b_cnt,             # 全地圖兵營總數
+                    global_r_cnt,             # 全地圖瓦斯廠總數
+                    global_t_cnt,             # 全地圖實驗室總數
+                    m_cnt / 10.0,             
+                    current_block / 16.0,     # 目前看哪裡
+                    screen_b_cnt > 0,         # 目前畫面看得到兵營嗎？ (布林值轉 0/1)
+                    1.0
                 ]
-                # 優化：先轉 numpy 陣列再轉 Tensor
                 state_t = torch.FloatTensor(np.array(state))
 
-                # 2. 選擇動作
+                # 2. 同時選擇動作與參數 (Epsilon-Greedy)
                 if random.random() <= epsilon:
-                    a_id = random.randint(0, 9)
+                    a_id = random.choice([0,1,2,3,4,5,6,7,8,9,40]) # 從可用動作中選
+                    p_id = random.randint(1, 16) # 隨機選一個網格
                 else:
-                    with torch.no_grad(): a_id = torch.argmax(brain_model(state_t.unsqueeze(0))).item()
+                    with torch.no_grad():
+                        q_actions, q_params = brain_model(state_t.unsqueeze(0))
+                        a_id = torch.argmax(q_actions).item()
+                        p_id = torch.argmax(q_params).item() + 1
 
-                # 3. 執行動作
-                sc2_action = hands.get_action(obs, a_id)
+                # 3. 執行動作：傳入參數
+                sc2_action = hands.get_action(obs, a_id, parameter=p_id)
                 obs_list = env.step([sc2_action, actions.FUNCTIONS.no_op()])
                 
                 # 4. 獎勵邏輯 (維持原有架構)
+                # --- 獎勵邏輯 (強化掠奪者權重) ---
                 step_reward = -0.01 
-                if r_cnt > last_r and r_cnt <= 2: step_reward += 15.0; last_r = r_cnt
-                if b_cnt > last_b and b_cnt <= 2: step_reward += 20.0; last_b = b_cnt
-                if t_cnt > last_t: step_reward += 40.0; last_t = t_cnt
                 if m_cnt > last_m:
-                    step_reward += 150.0; last_m = m_cnt
-                    if m_cnt >= 5: step_reward += 500.0
+                    step_reward += 200.0  
+                    last_m = m_cnt
+                    if m_cnt >= 5: 
+                        step_reward += 1000.0
+
                 total_reward += step_reward
+
 
                 # 5. 提取下一個狀態並存入記憶
                 next_obs = obs_list[0]
                 next_unit = next_obs.observation.feature_screen[features.SCREEN_FEATURES.unit_type.index]
+                # --- 修正後的 next_state (確保與 state 的 11 維度完全對齊) ---
+                next_player = next_obs.observation.player
+                next_unit = next_obs.observation.feature_screen[features.SCREEN_FEATURES.unit_type.index]
+
                 next_state = [
-                    next_obs.observation.player.minerals / 1000, next_obs.observation.player.vespene / 500,
-                    next_obs.observation.player.food_used / 50, np.sum(next_unit==21), 
-                    np.sum(next_unit==20), np.sum(next_unit==37), int(np.sum(next_unit==51)/20) / 10,
-                    0, 0, 1.0
+                    next_player.food_workers / 16,               # 1. 工兵 (原代碼漏掉這項導致維度變 10)
+                    next_player.minerals / 1000,                # 2. 礦石
+                    next_player.vespene / 500,                 # 3. 瓦斯
+                    next_player.food_used / 50,                 # 4. 人口
+                    np.sum(next_unit == 21),                    # 5. 兵營
+                    np.sum(next_unit == 20),                    # 6. 瓦斯廠
+                    np.sum(next_unit == 37),                    # 7. 科技實驗室
+                    int(np.sum(next_unit == 51) / 20) / 10,     # 8. 掠奪者
+                    current_block / 16.0,                       # 9. 目前視角
+                    0,                                          # 10. 預留
+                    1.0                                         # 11. 常數
                 ]
                 
                 done = bool(next_obs.last() or m_cnt >= 5 or curr_loop >= 13440)
-                # 存入記憶時強制轉換類型
-                memory.append((state, int(a_id), float(step_reward), next_state, bool(done)))
+                memory.append((state, int(a_id), int(p_id), float(step_reward), next_state, bool(done)))
 
                 # --- 🧠 模型學習部分的修正 ---
+                # --- 學習部分的雙頭 Loss ---
                 if len(memory) > 256:
                     batch = random.sample(memory, 64)
-                    b_states, b_actions, b_rewards, b_next_states, b_dones = zip(*batch)
+                    # 加入 b_params
+                    b_states, b_actions, b_params, b_rewards, b_next_states, b_dones = zip(*batch)
                     
-                    # 使用 torch.as_tensor 或先轉為 float 類型的 numpy 陣列
                     b_states_t = torch.as_tensor(np.array(b_states), dtype=torch.float32)
                     b_next_states_t = torch.as_tensor(np.array(b_next_states), dtype=torch.float32)
                     b_actions_t = torch.as_tensor(b_actions, dtype=torch.long)
+                    b_params_t = torch.as_tensor(b_params, dtype=torch.long) - 1 # 轉回 0-15 索引
                     b_rewards_t = torch.as_tensor(b_rewards, dtype=torch.float32)
-                    
-                    # 這裡最關鍵：先轉成 float 的 numpy 陣列，再轉 Tensor
                     b_dones_t = torch.as_tensor(np.array(b_dones, dtype=np.float32))
 
-                    with torch.no_grad():
-                        # 使用 .max(1)[0] 確保 Q 值維度正確
-                        next_q = brain_model(b_next_states_t).max(1)[0]
-                        targets = b_rewards_t + (1 - b_dones_t) * gamma * next_q
+                    # 同時計算當前動作與參數的 Q 值
+                    curr_q_a, curr_q_p = brain_model(b_states_t)
+                    # 同時計算下一個狀態的動作與參數 Q 值
+                    next_q_a, next_q_p = brain_model(b_next_states_t)
                     
-                    current_q = brain_model(b_states_t).gather(1, b_actions_t.unsqueeze(1)).squeeze(1)
-                    loss = criterion(current_q, targets)
-                    optimizer.zero_grad(); loss.backward(); optimizer.step()
+                    # 動作 Loss 計算
+                    targets_a = b_rewards_t + (1 - b_dones_t) * gamma * next_q_a.max(1)[0].detach()
+                    loss_a = criterion(curr_q_a.gather(1, b_actions_t.unsqueeze(1)).squeeze(1), targets_a)
+                    
+                    # 參數 Loss 計算 (讓網格選擇也跟著獎勵學習)
+                    targets_p = b_rewards_t + (1 - b_dones_t) * gamma * next_q_p.max(1)[0].detach()
+                    loss_p = criterion(curr_q_p.gather(1, b_params_t.unsqueeze(1)).squeeze(1), targets_p)
+                    
+                    # 合併 Loss 並更新模型
+                    total_loss = loss_a + loss_p
+                    optimizer.zero_grad()
+                    total_loss.backward()
+                    optimizer.step()
 
                 if done:
                     loc_text = (production_ai.BASE_LOCATION_CODE == 1)
                     reason = "Target_Reached" if m_cnt >= 5 else "Timeout"
                     
-                    # 修正 2: 傳入當前的 epsilon 給紀錄器 (放在第 2 個參數)
                     logger.log_episode(ep+1, epsilon, total_reward, m_cnt, curr_loop, reason, loc_text)
                     
-                    print(f"回合結束 | 好奇率: {epsilon:.3f} | 出生點右下: {loc_text} | "
-                        f"產量: {int(m_cnt)} | 總分: {int(total_reward)}")
+                    # 【修正】將 worker_cnt 改為 current_workers
+                    print(f"回合結束 | 掠奪者數量: {m_cnt} | 工兵數量: {current_workers} | 總分: {int(total_reward)}")
                     break
             
             # 回合結束後更新 epsilon
