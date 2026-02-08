@@ -1,9 +1,0 @@
-Episode,Total_Reward,Marauders,End_Loop,Reason,Is_Bottom_Right
-1,375,1,13440,Timeout,True
-2,715,4,13440,Timeout,True
-3,185,0,13440,Timeout,False
-4,35,0,13440,Timeout,True
-5,335,0,13440,Timeout,True
-6,35,0,13440,Timeout,False
-7,335,0,13440,Timeout,True
-8,35,0,13440,Timeout,True
