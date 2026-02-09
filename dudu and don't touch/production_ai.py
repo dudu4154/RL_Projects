@@ -173,7 +173,7 @@ class ProductionAI:
         elif action_id == 2:
             if player.minerals >= 100 and actions.FUNCTIONS.Build_SupplyDepot_screen.id in available:
                 return actions.FUNCTIONS.Build_SupplyDepot_screen("now", grid_pos)
-            return self._select_scv(unit_type)
+            return self._select_scv(unit_type, available)
 
         # [Action 3] 建造瓦斯廠 (精確中心鎖定)
         elif action_id == 3:
@@ -181,7 +181,7 @@ class ProductionAI:
                 self.refinery_target = self._find_geyser(unit_type)
                 if self.refinery_target:
                     return actions.FUNCTIONS.Build_Refinery_screen("now", self.refinery_target)
-            return self._select_scv(unit_type)
+            return self._select_scv(unit_type, available)
 
         # [Action 4] 指派採瓦斯 (上限 3 人/廠)
         elif action_id == 4:
@@ -197,7 +197,7 @@ class ProductionAI:
         elif action_id == 5:
             if player.minerals >= 150 and actions.FUNCTIONS.Build_Barracks_screen.id in available:
                 return actions.FUNCTIONS.Build_Barracks_screen("now", grid_pos)
-            return self._select_scv(unit_type)
+            return self._select_scv(unit_type, available)
         
         # [Action 6] 研發科技實驗室 (造掠奪者必備)
         elif action_id == 6:
@@ -226,65 +226,65 @@ class ProductionAI:
         elif action_id == 9:
             if player.minerals >= 400 and actions.FUNCTIONS.Build_CommandCenter_screen.id in available:
                 return actions.FUNCTIONS.Build_CommandCenter_screen("now", grid_pos)
-            return self._select_scv(unit_type)'''
+            return self._select_scv(unit_type, available)'''
         # [Action 1.]建造補給站
         if action_id == 1:
             if player.minerals >= 100 and actions.FUNCTIONS.Build_SupplyDepot_screen.id in available:
                 return actions.FUNCTIONS.Build_SupplyDepot_screen("now", grid_pos)
-            return self._select_scv(unit_type)
+            return self._select_scv(unit_type, available)
         
         # [Action 2] 建造兵營 (自動位移邏輯)
         elif action_id == 2:
             if player.minerals >= 150 and actions.FUNCTIONS.Build_Barracks_screen.id in available:
                 return actions.FUNCTIONS.Build_Barracks_screen("now", grid_pos)
-            return self._select_scv(unit_type)
+            return self._select_scv(unit_type, available)
         
         elif action_id == 3:
             if player.minerals >= 150 and player.vespene >= 100 and actions.FUNCTIONS.Build_Factory_screen.id in available:
                 return actions.FUNCTIONS.Build_Factory_screen("now", grid_pos)
-            return self._select_scv(unit_type)
+            return self._select_scv(unit_type, available)
 
         # [Action 4] 建造星際港 (150 M, 100 V)
         elif action_id == 4:
             if player.minerals >= 150 and player.vespene >= 100 and actions.FUNCTIONS.Build_Starport_screen.id in available:
                 return actions.FUNCTIONS.Build_Starport_screen("now", grid_pos)
-            return self._select_scv(unit_type)
+            return self._select_scv(unit_type, available)
 
         # [Action 5] 建造核融合核心 (150 M, 150 V)
         elif action_id == 5:
             if player.minerals >= 150 and player.vespene >= 150 and actions.FUNCTIONS.Build_FusionCore_screen.id in available:
                 return actions.FUNCTIONS.Build_FusionCore_screen("now", grid_pos)
-            return self._select_scv(unit_type)
+            return self._select_scv(unit_type, available)
 
         # [Action 6] 建造指揮中心 (400 M)
         elif action_id == 6:
             if player.minerals >= 400 and actions.FUNCTIONS.Build_CommandCenter_screen.id in available:
                 return actions.FUNCTIONS.Build_CommandCenter_screen("now", grid_pos)
-            return self._select_scv(unit_type)
+            return self._select_scv(unit_type, available)
 
         # [Action 7] 建造電機工程所 (125 M)
         elif action_id == 7:
             if player.minerals >= 125 and actions.FUNCTIONS.Build_EngineeringBay_screen.id in available:
                 return actions.FUNCTIONS.Build_EngineeringBay_screen("now", grid_pos)
-            return self._select_scv(unit_type)
+            return self._select_scv(unit_type, available)
 
         # [Action 8] 建造感應塔 (125 M, 50 V)
         elif action_id == 8:
             if player.minerals >= 125 and player.vespene >= 50 and actions.FUNCTIONS.Build_SensorTower_screen.id in available:
                 return actions.FUNCTIONS.Build_SensorTower_screen("now", grid_pos)
-            return self._select_scv(unit_type)
+            return self._select_scv(unit_type, available)
 
         # [Action 9] 建造幽靈特務學院 (150 M, 50 V)
         elif action_id == 9:
             if player.minerals >= 150 and player.vespene >= 50 and actions.FUNCTIONS.Build_GhostAcademy_screen.id in available:
                 return actions.FUNCTIONS.Build_GhostAcademy_screen("now", grid_pos)
-            return self._select_scv(unit_type)
+            return self._select_scv(unit_type, available)
 
         # [Action 10] 建造兵工廠 (150 M, 100 V)
         elif action_id == 10:
             if player.minerals >= 150 and player.vespene >= 100 and actions.FUNCTIONS.Build_Armory_screen.id in available:
                 return actions.FUNCTIONS.Build_Armory_screen("now", grid_pos)
-            return self._select_scv(unit_type)
+            return self._select_scv(unit_type, available)
         
         # [Action 11] 建造瓦斯廠 (精確中心鎖定)
         elif action_id == 11:
@@ -292,19 +292,19 @@ class ProductionAI:
                 self.refinery_target = self._find_geyser(unit_type)
                 if self.refinery_target:
                     return actions.FUNCTIONS.Build_Refinery_screen("now", self.refinery_target)
-            return self._select_scv(unit_type)
+            return self._select_scv(unit_type, available)
         
         # [Action 12] 建造飛彈砲台 (100 M)
         elif action_id == 12:
             if player.minerals >= 100 and actions.FUNCTIONS.Build_MissileTurret_screen.id in available:
                 return actions.FUNCTIONS.Build_MissileTurret_screen("now", grid_pos)
-            return self._select_scv(unit_type)
+            return self._select_scv(unit_type, available)
 
         # [Action 13] 建造碉堡 (100 M)
         elif action_id == 13:
             if player.minerals >= 100 and actions.FUNCTIONS.Build_Bunker_screen.id in available:
                 return actions.FUNCTIONS.Build_Bunker_screen("now", grid_pos)
-            return self._select_scv(unit_type)
+            return self._select_scv(unit_type, available)
         
         # --- [Action 14-32] 單位生產指令集 ---
 
@@ -526,11 +526,20 @@ class ProductionAI:
             return actions.FUNCTIONS.select_point("select", (int(x.mean()), int(y.mean())))
         return actions.FUNCTIONS.no_op()
 
-    def _select_scv(self, unit_type):
+    # --- 修改後的選取工兵邏輯 ---
+    def _select_scv(self, unit_type, available):
+        """ 優先選取空閒工兵，若無空閒則從畫面隨機選取 """
+        
+        # 1. 優先判斷是否有空閒工兵 (select_idle_worker)
+        if actions.FUNCTIONS.select_idle_worker.id in available:
+            return actions.FUNCTIONS.select_idle_worker("select")
+            
+        # 2. 如果沒有空閒工兵，才執行原本的畫面隨機點擊邏輯
         y, x = (unit_type == SCV_ID).nonzero()
         if x.any():
             idx = random.randint(0, len(x) - 1)
             return actions.FUNCTIONS.select_point("select", (x[idx], y[idx]))
+            
         return actions.FUNCTIONS.no_op()
 
     def _select_scv_filtered(self, unit_type, target):
@@ -542,7 +551,7 @@ class ProductionAI:
             if mask.any():
                 idx = random.choice(np.where(mask)[0])
                 return actions.FUNCTIONS.select_point("select", (x[idx], y[idx]))
-        return self._select_scv(unit_type)
+        return self._select_scv(unit_type, available)
 
     def _calc_depot_pos(self):
         """ 三角形排列座標計算 """
