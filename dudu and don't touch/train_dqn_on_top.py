@@ -159,7 +159,7 @@ def main(argv):
             feature_dimensions=sc2_env.Dimensions(screen=84, minimap=64), use_raw_units=False),
         step_mul=16, realtime=False
     ) as env:
-        for ep in range(100):
+        for ep in range(1000):
             hands = ProductionAI() 
             print(f"\n🚀 === 啟動第 {ep+1} 回合 (Epsilon: {epsilon:.3f}) ===")
             obs_list = env.reset()
@@ -227,6 +227,20 @@ def main(argv):
                     # 這裡是浮點數除法，不會報 CastingError
                     curr_count = float(self_pixels) / float(divisor)
 
+                if CURRENT_TRAIN_TASK >= 16:
+                    m_unit = next_obs.observation.feature_minimap[features.MINIMAP_FEATURES.unit_type.index]
+                    curr_b = np.sum(m_unit == production_ai.BARRACKS_ID)
+                    curr_t = np.sum(m_unit == production_ai.BARRACKS_TECHLAB_ID)
+                    
+                    if curr_b > last_b: # 蓋出兵營獎勵
+                        step_reward += 50.0
+                        print("🏗️ 蓋出兵營，獎勵 +50")
+                        last_b = curr_b
+                    if curr_t > last_t: # 蓋出科技實驗室獎勵
+                        step_reward += 80.0
+                        print("🧪 蓋出科技實驗室，獎勵 +80")
+                        last_t = curr_t
+                        
                 # 只要「單位數量」增加，就給予獎勵
                 # 使用 round 處理微小像素波動
                 if round(curr_count) > round(last_target_count):
@@ -249,7 +263,9 @@ def main(argv):
                 
                 # 判斷是否結束
                 m_cnt_now = int(np.sum(next_s_unit == 51) / 20) 
-                done = bool(next_obs.last() or m_cnt_now >= 5 or next_obs.observation.game_loop[0] >= 13440)
+                # --- 修改後的結束判斷 ---
+                # 條件：對局結束 OR 掠奪者達 5 隻 OR 時間達 15 分鐘 (20160 loops)
+                done = bool(next_obs.last() or m_cnt_now >= 5 or next_obs.observation.game_loop[0] >= 20160)
                 
                 memory.append((state, int(a_id), int(p_id), float(step_reward), next_state, bool(done)))
 

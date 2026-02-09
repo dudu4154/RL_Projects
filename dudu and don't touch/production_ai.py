@@ -344,12 +344,17 @@ class ProductionAI:
                 return actions.FUNCTIONS.Train_Reaper_quick("now")
             return self._select_unit(unit_type, BARRACKS_ID)
 
-        # [Action 18] 製造掠奪者 (Marauder) - 100 M, 25 V
+        # [Action 18] 製造掠奪者 (修正版)
         elif action_id == 18:
-            if player.minerals >= 100 and player.vespene >= 25 and actions.FUNCTIONS.Train_Marauder_quick.id in available:
+            if actions.FUNCTIONS.Train_Marauder_quick.id in available:
                 return actions.FUNCTIONS.Train_Marauder_quick("now")
-            return self._select_unit(unit_type, BARRACKS_ID)
-
+            
+            # 不要用 _select_unit，改用 centers 確保點在建築物上
+            centers = self._find_units_centers(unit_type, BARRACKS_ID)
+            if centers:
+                return actions.FUNCTIONS.select_point("select", random.choice(centers))
+            return actions.FUNCTIONS.no_op()
+        
         # [Action 19] 製造幽靈特務 (Ghost) - 150 M, 125 V
         elif action_id == 19:
             if player.minerals >= 150 and player.vespene >= 125 and actions.FUNCTIONS.Train_Ghost_quick.id in available:
@@ -443,14 +448,32 @@ class ProductionAI:
             return self._select_unit(unit_type, SUPPLY_DEPOT_ID)
 
         # [Action 34] 兵營升級 (奇數: 科技實驗室 / 偶數: 反應爐)
+        
+# [Action 34] 兵營升級 (優化穩定版)
         elif action_id == 34:
-            if self.active_parameter % 2 == 1: # 奇數分支
-                if player.minerals >= 50 and player.vespene >= 25 and actions.FUNCTIONS.Build_TechLab_Barracks_quick.id in available:
-                    return actions.FUNCTIONS.Build_TechLab_Barracks_quick("now")
-            else: # 偶數分支
-                if player.minerals >= 50 and player.vespene >= 50 and actions.FUNCTIONS.Build_Reactor_Barracks_quick.id in available:
-                    return actions.FUNCTIONS.Build_Reactor_Barracks_quick("now")
-            return self._select_unit(unit_type, BARRACKS_ID)
+            # 1. 決定要升級哪一種
+            is_tech_lab = (self.active_parameter % 2 == 1)
+            
+            # 2. 獲取動作 (優先嘗試通用型，再嘗試專用型)
+            if is_tech_lab:
+                action = getattr(actions.FUNCTIONS, "Build_TechLab_quick", None)
+                if not action: action = getattr(actions.FUNCTIONS, "Build_TechLab_Barracks_quick", None)
+                req_m, req_v = 50, 25
+            else:
+                action = getattr(actions.FUNCTIONS, "Build_Reactor_quick", None)
+                if not action: action = getattr(actions.FUNCTIONS, "Build_Reactor_Barracks_quick", None)
+                req_m, req_v = 50, 50
+
+            # 3. 執行升級 (若動作可用且資源足夠)
+            if action and action.id in available and player.minerals >= req_m and player.vespene >= req_v:
+                return action("now")
+            
+            # 4. 若無法執行，則精確選取兵營 (避免點擊到多個兵營的平均中心空地)
+            barracks_centers = self._find_units_centers(unit_type, BARRACKS_ID)
+            if barracks_centers:
+                # 隨機選一個兵營，增加 AI 嘗試不同建築的機會
+                return actions.FUNCTIONS.select_point("select", random.choice(barracks_centers))
+            return actions.FUNCTIONS.no_op()
 
         # [Action 35] 軍工廠升級 (奇數: 科技實驗室 / 偶數: 反應爐)
         elif action_id == 35:
@@ -627,8 +650,8 @@ def main(argv):
             print("--- 啟動新對局 ---")
             obs_list = env.reset()
             while True:
-                action_id = random.randint(1, 40)
-                param = random.randint(1, 16) # 網格限制 1-16
+                action_id = random.choice([1, 2, 11, 18, 34])#random.randint(1, 40)
+                param = 1#random.randint(1, 16) # 網格限制 1-16
                 
                 sc2_action = agent.get_action(obs_list[0], action_id, parameter=param)
                 
