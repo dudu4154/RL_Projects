@@ -5,7 +5,7 @@ import csv
 import time
 from absl import app
 from pysc2.env import sc2_env
-from pysc2.lib import actions, features, units
+from pysc2.lib import actions, features  # 刪掉最後面的 , units
 
 # 定義人族單位 ID
 COMMAND_CENTER_ID = 18
@@ -542,7 +542,7 @@ class ProductionAI:
             
         return actions.FUNCTIONS.no_op()
 
-    def _select_scv_filtered(self, unit_type, target):
+    def _select_scv_filtered(self, unit_type, target, available): # 這裡要加 available
         """ 選取遠離目標資源點的工兵，避免拉走正在採氣的人 """
         y, x = (unit_type == SCV_ID).nonzero()
         if x.any() and target:
@@ -551,7 +551,7 @@ class ProductionAI:
             if mask.any():
                 idx = random.choice(np.where(mask)[0])
                 return actions.FUNCTIONS.select_point("select", (x[idx], y[idx]))
-        return self._select_scv(unit_type, available)
+        return self._select_scv(unit_type, available) # 這裡原本沒傳參數會報錯
 
     def _calc_depot_pos(self):
         """ 三角形排列座標計算 """
