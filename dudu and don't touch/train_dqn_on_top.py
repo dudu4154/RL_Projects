@@ -13,9 +13,35 @@ from pysc2.lib import actions, features
 # 匯入底層腳本
 import production_ai 
 from production_ai import ProductionAI
+import logging
+from absl import logging as absl_logging
 
+# 屏蔽 features.py 產出的警告訊息
+absl_logging.set_verbosity(absl_logging.ERROR)
+# --- 1. 定義 Action ID 與 Unit ID 的對應  ---
+TARGET_UNIT_MAP = {
+    14: production_ai.SCV_ID,       16: 48,  # Marine
+    17: 49,  # Reaper              18: production_ai.MARAUDER_ID,
+    19: 50,  # Ghost               20: 53,  # Hellion
+    21: 484, # Hellbat             22: 498, # WidowMine
+    23: 33,  # SiegeTank           24: 692, # Cyclone
+    25: 52,  # Thor                26: 34,  # Viking
+    27: 54,  # Medivac             28: 689, # Liberator
+    29: 56,  # Raven               30: 57,  # Battlecruiser
+    31: 55,  # Banshee             32: production_ai.PLANETARY_FORTRESS_ID
+}
+
+PIXELS_PER_UNIT = {
+    production_ai.SCV_ID: 15,
+    48: 10,  # Marine
+    49: 15,  # Reaper
+    production_ai.MARAUDER_ID: 22, # Marauder 體型較大，約 20-25 像素
+    50: 15,  # Ghost
+    33: 150, # Siege Tank (建築/重型單位像素較多)
+    # 建築物類建議只要像素 > 0 就算 1 棟，或是給予較大除數
+}
 # =========================================================
-# 🐒 猴子補丁與路徑設定
+# 🐒 路徑設定
 # =========================================================
 current_dir = os.path.dirname(os.path.abspath(__file__))
 log_dir = os.path.join(current_dir, "log")
@@ -70,34 +96,48 @@ class QNetwork(nn.Module):
         x = self.common(x)
         return self.action_head(x), self.param_head(x) # 同時回傳兩組 Q 值
     
-    def get_state_vector(obs, current_block):
-        player = obs.observation.player
-        m_unit = obs.observation.feature_minimap[features.MINIMAP_FEATURES.unit_type.index]
-        s_unit = obs.observation.feature_screen[features.SCREEN_FEATURES.unit_type.index]
-        
-        # 統一計算邏輯
-        return [
-            player.food_workers / 16,                               # 1. 工兵
-            player.minerals / 1000,                                 # 2. 礦石
-            player.vespene / 500,                                  # 3. 瓦斯
-            player.food_used / 50,                                 # 4. 人口
-            np.sum(m_unit == production_ai.BARRACKS_ID),            # 5. 全地圖兵營 (小地圖)
-            np.sum(m_unit == production_ai.REFINERY_ID),            # 6. 全地圖瓦斯廠 (小地圖)
-            np.sum(m_unit == production_ai.BARRACKS_TECHLAB_ID),    # 7. 全地圖實驗室 (小地圖)
-            int(np.sum(s_unit == 51) / 20) / 10,                   # 8. 掠奪者 (畫面)
-            current_block / 16.0,                                   # 9. 視角位置
-            float(np.sum(s_unit == 21) > 0),                        # 10. 畫面是否有兵營 (轉為 0.0/1.0)
-            1.0                                                     # 11. 常數
-        ]
+def get_state_vector(obs, current_block, target_project_id):
+    player = obs.observation.player
+    m_unit = obs.observation.feature_minimap[features.MINIMAP_FEATURES.unit_type.index]
+    s_unit = obs.observation.feature_screen[features.SCREEN_FEATURES.unit_type.index]
+    # 【新增】取得螢幕歸屬層 (1: 自己, 3: 中立, 4: 敵人)
+    s_relative = obs.observation.feature_screen[features.SCREEN_FEATURES.player_relative.index]
+    
+    target_unit_id = TARGET_UNIT_MAP.get(target_project_id, 0)
+    
+    # 【核心修正】過濾背景，只算自己的單位
+    if target_project_id == 14: 
+        current_target_count = float(player.food_workers)
+    else:
+        # 只計算 (ID 符合) 且 (屬於自己) 的像素
+        self_pixels = np.sum((s_unit == target_unit_id) & (s_relative == 1))
+        # 換算為單位數
+        divisor = PIXELS_PER_UNIT.get(target_unit_id, 20)
+        current_target_count = float(self_pixels) / float(divisor)
+
+    return [
+        player.food_workers / 16,
+        player.minerals / 1000,
+        player.vespene / 500,
+        player.food_used / 50,
+        np.sum(m_unit == production_ai.BARRACKS_ID),
+        np.sum(m_unit == production_ai.REFINERY_ID),
+        np.sum(m_unit == production_ai.BARRACKS_TECHLAB_ID),
+        current_target_count / 10.0,
+        current_block / 16.0,
+        float(np.sum((s_unit == production_ai.BARRACKS_ID) & (s_relative == 1)) > 0), # 兵營也同步過濾
+        1.0,
+        target_project_id / 40.0
+    ]
 
 # =========================================================
 # 🎮 訓練主程式
 # =========================================================
 def main(argv):
     del argv
-    state_size = 11 # 增加一格狀態紀錄「目前看哪」
+    state_size = 12 # 增加一格狀態紀錄「目前看哪」
     action_size = 41
-    
+    CURRENT_TRAIN_TASK = 18
     brain_model = QNetwork(state_size, action_size)
     optimizer = optim.Adam(brain_model.parameters(), lr=0.0005) 
     criterion = nn.MSELoss()
@@ -125,13 +165,16 @@ def main(argv):
             obs_list = env.reset()
             last_m=0; last_b=0; last_r=0; last_t=0
             total_reward = 0
+            last_target_count = 0
             
+
             while True:
                 obs = obs_list[0]
                 player = obs.observation.player # 新增：提取 player 資訊
                 current_workers = player.food_workers # 
+                current_block = getattr(hands, 'active_parameter', 1)
                 minimap_unit_type = obs.observation.feature_minimap[features.MINIMAP_FEATURES.unit_type.index]
-                
+                state = get_state_vector(obs, current_block, CURRENT_TRAIN_TASK)
                 # --- 【修正 1】 提取必要變數 ---
                 unit_type = obs.observation.feature_screen[features.SCREEN_FEATURES.unit_type.index]
                 r_cnt = np.sum(unit_type == 20)  
@@ -150,46 +193,49 @@ def main(argv):
 
                 # 提取狀態 (確保 current_workers 與 player 已定義)
                 current_block = getattr(hands, 'active_parameter', 1)
-                state = [
-                    current_workers / 16,
-                    player.minerals / 1000,
-                    player.vespene / 500,
-                    player.food_used / 50,
-                    global_b_cnt,             # 全地圖兵營總數
-                    global_r_cnt,             # 全地圖瓦斯廠總數
-                    global_t_cnt,             # 全地圖實驗室總數
-                    m_cnt / 10.0,             
-                    current_block / 16.0,     # 目前看哪裡
-                    screen_b_cnt > 0,         # 目前畫面看得到兵營嗎？ (布林值轉 0/1)
-                    1.0
-                ]
+                state = get_state_vector(obs, current_block, CURRENT_TRAIN_TASK)
+                # --- 1. 選擇動作 ---
                 state_t = torch.FloatTensor(np.array(state))
-
-                # 2. 同時選擇動作與參數 (Epsilon-Greedy)
                 if random.random() <= epsilon:
-                    a_id = random.randint(1, 40)# 從可用動作中選
-                    p_id = random.randint(1, 16) # 隨機選一個網格
+                    a_id = random.randint(1, 40)
+                    p_id = random.randint(1, 16)
                 else:
                     with torch.no_grad():
                         q_actions, q_params = brain_model(state_t.unsqueeze(0))
                         a_id = torch.argmax(q_actions).item()
                         p_id = torch.argmax(q_params).item() + 1
 
-                # 3. 執行動作：傳入參數
+                # --- 2. 執行動作 (只執行一次 env.step) ---
                 sc2_action = hands.get_action(obs, a_id, parameter=p_id)
                 obs_list = env.step([sc2_action, actions.FUNCTIONS.no_op()])
+                next_obs = obs_list[0]
                 
-                # 4. 獎勵邏輯 (維持原有架構)
-                # --- 獎勵邏輯 (強化掠奪者權重) ---
-                step_reward = -0.01 
-                if m_cnt > last_m:
-                    step_reward += 200.0  
-                    last_m = m_cnt
-                    if m_cnt >= 5: 
-                        step_reward += 1000.0
+                # --- 3. 獎勵邏輯計算 ---
+                # --- 3. 獎勵邏輯計算 (統一版) ---
+                step_reward = -0.01  # 基礎時間懲罰
+                
+                next_s_unit = next_obs.observation.feature_screen[features.SCREEN_FEATURES.unit_type.index]
+                next_s_relative = next_obs.observation.feature_screen[features.SCREEN_FEATURES.player_relative.index]
+                target_uid = TARGET_UNIT_MAP.get(CURRENT_TRAIN_TASK, 0)
+                
+                if CURRENT_TRAIN_TASK == 14:
+                    curr_count = float(next_obs.observation.player.food_workers)
+                else:
+                    # 計算「屬於我」的目標像素
+                    self_pixels = np.sum((next_s_unit == target_uid) & (next_s_relative == 1))
+                    divisor = PIXELS_PER_UNIT.get(target_uid, 20)
+                    # 這裡是浮點數除法，不會報 CastingError
+                    curr_count = float(self_pixels) / float(divisor)
+
+                # 只要「單位數量」增加，就給予獎勵
+                # 使用 round 處理微小像素波動
+                if round(curr_count) > round(last_target_count):
+                    reward_value = 200.0
+                    step_reward += reward_value
+                    print(f"🎯 訓練成功! 項目:{CURRENT_TRAIN_TASK} | 單位數:{int(round(curr_count))} | 獎勵 +{reward_value}")
+                    last_target_count = curr_count
 
                 total_reward += step_reward
-
 
                 # 5. 提取下一個狀態並存入記憶
                 next_obs = obs_list[0]
@@ -198,21 +244,13 @@ def main(argv):
                 next_player = next_obs.observation.player
                 next_unit = next_obs.observation.feature_screen[features.SCREEN_FEATURES.unit_type.index]
 
-                next_state = [
-                    next_player.food_workers / 16,               # 1. 工兵 (原代碼漏掉這項導致維度變 10)
-                    next_player.minerals / 1000,                # 2. 礦石
-                    next_player.vespene / 500,                 # 3. 瓦斯
-                    next_player.food_used / 50,                 # 4. 人口
-                    np.sum(next_unit == 21),                    # 5. 兵營
-                    np.sum(next_unit == 20),                    # 6. 瓦斯廠
-                    np.sum(next_unit == 37),                    # 7. 科技實驗室
-                    int(np.sum(next_unit == 51) / 20) / 10,     # 8. 掠奪者
-                    current_block / 16.0,                       # 9. 目前視角
-                    0,                                          # 10. 預留
-                    1.0                                         # 11. 常數
-                ]
+                updated_block = getattr(hands, 'active_parameter', 1)
+                next_state = get_state_vector(next_obs, updated_block, CURRENT_TRAIN_TASK)
                 
-                done = bool(next_obs.last() or m_cnt >= 5 or curr_loop >= 13440)
+                # 判斷是否結束
+                m_cnt_now = int(np.sum(next_s_unit == 51) / 20) 
+                done = bool(next_obs.last() or m_cnt_now >= 5 or next_obs.observation.game_loop[0] >= 13440)
+                
                 memory.append((state, int(a_id), int(p_id), float(step_reward), next_state, bool(done)))
 
                 # --- 🧠 模型學習部分的修正 ---
