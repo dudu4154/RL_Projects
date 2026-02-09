@@ -1,3 +1,0 @@
-Episode,Epsilon,Total_Reward,Marauders,End_Loop,Reason,Is_Bottom_Right
-1,1.000,-8,0,13424,Timeout,False
-2,0.999,-8,0,13424,Timeout,True
