@@ -69,6 +69,26 @@ class QNetwork(nn.Module):
     def forward(self, x):
         x = self.common(x)
         return self.action_head(x), self.param_head(x) # 同時回傳兩組 Q 值
+    
+    def get_state_vector(obs, current_block):
+        player = obs.observation.player
+        m_unit = obs.observation.feature_minimap[features.MINIMAP_FEATURES.unit_type.index]
+        s_unit = obs.observation.feature_screen[features.SCREEN_FEATURES.unit_type.index]
+        
+        # 統一計算邏輯
+        return [
+            player.food_workers / 16,                               # 1. 工兵
+            player.minerals / 1000,                                 # 2. 礦石
+            player.vespene / 500,                                  # 3. 瓦斯
+            player.food_used / 50,                                 # 4. 人口
+            np.sum(m_unit == production_ai.BARRACKS_ID),            # 5. 全地圖兵營 (小地圖)
+            np.sum(m_unit == production_ai.REFINERY_ID),            # 6. 全地圖瓦斯廠 (小地圖)
+            np.sum(m_unit == production_ai.BARRACKS_TECHLAB_ID),    # 7. 全地圖實驗室 (小地圖)
+            int(np.sum(s_unit == 51) / 20) / 10,                   # 8. 掠奪者 (畫面)
+            current_block / 16.0,                                   # 9. 視角位置
+            float(np.sum(s_unit == 21) > 0),                        # 10. 畫面是否有兵營 (轉為 0.0/1.0)
+            1.0                                                     # 11. 常數
+        ]
 
 # =========================================================
 # 🎮 訓練主程式
@@ -120,7 +140,7 @@ def main(argv):
                 m_cnt = int(np.sum(unit_type == 51) / 20) 
                 curr_loop = obs.observation.game_loop[0]
                 # 在小地圖中，建築物也會以對應的 ID 顯示
-                global_b_cnt = np.sum(minimap_unit_type == production_ai.BARRACKS_ID) 
+                global_b_cnt = np.sum(minimap_unit_type == production_ai.BARRACKS_ID)
                 global_r_cnt = np.sum(minimap_unit_type == production_ai.REFINERY_ID)
                 global_t_cnt = np.sum(minimap_unit_type == production_ai.BARRACKS_TECHLAB_ID)
                 
@@ -147,7 +167,7 @@ def main(argv):
 
                 # 2. 同時選擇動作與參數 (Epsilon-Greedy)
                 if random.random() <= epsilon:
-                    a_id = random.choice([0,1,2,3,4,5,6,7,8,9,40]) # 從可用動作中選
+                    a_id = random.randint(1, 40)# 從可用動作中選
                     p_id = random.randint(1, 16) # 隨機選一個網格
                 else:
                     with torch.no_grad():

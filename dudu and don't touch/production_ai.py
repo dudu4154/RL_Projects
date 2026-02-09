@@ -12,12 +12,20 @@ COMMAND_CENTER_ID = 18
 SUPPLY_DEPOT_ID = 19
 REFINERY_ID = 20
 BARRACKS_ID = 21
+ENGINEERING_BAY_ID = 22  
 BARRACKS_TECHLAB_ID = 37
 SCV_ID = 45
 MARAUDER_ID = 51
 MINERAL_FIELD_ID = 341
 GEYSER_ID = 342
 BASE_LOCATION_CODE = 0
+FACTORY_ID = 27
+STARPORT_ID = 28
+ARMORY_ID = 29
+FUSION_CORE_ID = 30
+GHOST_ACADEMY_ID = 26
+ORBITAL_COMMAND_ID = 132
+PLANETARY_FORTRESS_ID = 130
 
 # =========================================================
 # 📊 數據收集器: 紀錄資源與訓練狀態
@@ -33,7 +41,7 @@ class DataCollector:
 
     def log_step(self, time_val, minerals, vespene, workers, ideal, action_id):
         # 轉為 float 以避免 NumPy 類型在 round 時報錯
-        display_time = float(time_val) 
+        display_time = float(time_val[0]) if hasattr(time_val, "__len__") else float(time_val)
         with open(self.filename, mode='a', newline='') as file:
             writer = csv.writer(file)
             writer.writerow([round(display_time, 2), minerals, vespene, workers, ideal, action_id])
@@ -42,6 +50,13 @@ class DataCollector:
 # 🧠 生產大腦: 整合所有功能與修正
 # =========================================================
 class ProductionAI:
+    # --- 新增安全獲取函式 ---
+    def _get_safe_func(self, name):
+        try:
+            return getattr(actions.FUNCTIONS, name)
+        except KeyError:
+            return None
+        
     def __init__(self):
         self.collector = DataCollector()
         self.depots_built = 0
@@ -147,14 +162,13 @@ class ProductionAI:
 
         # --- 3. 完整動作邏輯分支 ---
 
-        # [Action 1] 訓練 SCV (飽和度檢查)
+        '''# [Action 1] 訓練 SCV (飽和度檢查)
         if action_id == 1:
             if current_workers < ideal_workers and player.minerals >= 50:
                 if actions.FUNCTIONS.Train_SCV_quick.id in available:
                     return actions.FUNCTIONS.Train_SCV_quick("now")
             return self._select_unit(unit_type, COMMAND_CENTER_ID)
 
-        # [Action 2] 建造補給站 (三角形排列邏輯)
         # [Action 2] 建造補給站
         elif action_id == 2:
             if player.minerals >= 100 and actions.FUNCTIONS.Build_SupplyDepot_screen.id in available:
@@ -212,8 +226,283 @@ class ProductionAI:
         elif action_id == 9:
             if player.minerals >= 400 and actions.FUNCTIONS.Build_CommandCenter_screen.id in available:
                 return actions.FUNCTIONS.Build_CommandCenter_screen("now", grid_pos)
+            return self._select_scv(unit_type)'''
+        # [Action 1.]建造補給站
+        if action_id == 1:
+            if player.minerals >= 100 and actions.FUNCTIONS.Build_SupplyDepot_screen.id in available:
+                return actions.FUNCTIONS.Build_SupplyDepot_screen("now", grid_pos)
             return self._select_scv(unit_type)
         
+        # [Action 2] 建造兵營 (自動位移邏輯)
+        elif action_id == 2:
+            if player.minerals >= 150 and actions.FUNCTIONS.Build_Barracks_screen.id in available:
+                return actions.FUNCTIONS.Build_Barracks_screen("now", grid_pos)
+            return self._select_scv(unit_type)
+        
+        elif action_id == 3:
+            if player.minerals >= 150 and player.vespene >= 100 and actions.FUNCTIONS.Build_Factory_screen.id in available:
+                return actions.FUNCTIONS.Build_Factory_screen("now", grid_pos)
+            return self._select_scv(unit_type)
+
+        # [Action 4] 建造星際港 (150 M, 100 V)
+        elif action_id == 4:
+            if player.minerals >= 150 and player.vespene >= 100 and actions.FUNCTIONS.Build_Starport_screen.id in available:
+                return actions.FUNCTIONS.Build_Starport_screen("now", grid_pos)
+            return self._select_scv(unit_type)
+
+        # [Action 5] 建造核融合核心 (150 M, 150 V)
+        elif action_id == 5:
+            if player.minerals >= 150 and player.vespene >= 150 and actions.FUNCTIONS.Build_FusionCore_screen.id in available:
+                return actions.FUNCTIONS.Build_FusionCore_screen("now", grid_pos)
+            return self._select_scv(unit_type)
+
+        # [Action 6] 建造指揮中心 (400 M)
+        elif action_id == 6:
+            if player.minerals >= 400 and actions.FUNCTIONS.Build_CommandCenter_screen.id in available:
+                return actions.FUNCTIONS.Build_CommandCenter_screen("now", grid_pos)
+            return self._select_scv(unit_type)
+
+        # [Action 7] 建造電機工程所 (125 M)
+        elif action_id == 7:
+            if player.minerals >= 125 and actions.FUNCTIONS.Build_EngineeringBay_screen.id in available:
+                return actions.FUNCTIONS.Build_EngineeringBay_screen("now", grid_pos)
+            return self._select_scv(unit_type)
+
+        # [Action 8] 建造感應塔 (125 M, 50 V)
+        elif action_id == 8:
+            if player.minerals >= 125 and player.vespene >= 50 and actions.FUNCTIONS.Build_SensorTower_screen.id in available:
+                return actions.FUNCTIONS.Build_SensorTower_screen("now", grid_pos)
+            return self._select_scv(unit_type)
+
+        # [Action 9] 建造幽靈特務學院 (150 M, 50 V)
+        elif action_id == 9:
+            if player.minerals >= 150 and player.vespene >= 50 and actions.FUNCTIONS.Build_GhostAcademy_screen.id in available:
+                return actions.FUNCTIONS.Build_GhostAcademy_screen("now", grid_pos)
+            return self._select_scv(unit_type)
+
+        # [Action 10] 建造兵工廠 (150 M, 100 V)
+        elif action_id == 10:
+            if player.minerals >= 150 and player.vespene >= 100 and actions.FUNCTIONS.Build_Armory_screen.id in available:
+                return actions.FUNCTIONS.Build_Armory_screen("now", grid_pos)
+            return self._select_scv(unit_type)
+        
+        # [Action 11] 建造瓦斯廠 (精確中心鎖定)
+        elif action_id == 11:
+            if player.minerals >= 75 and actions.FUNCTIONS.Build_Refinery_screen.id in available:
+                self.refinery_target = self._find_geyser(unit_type)
+                if self.refinery_target:
+                    return actions.FUNCTIONS.Build_Refinery_screen("now", self.refinery_target)
+            return self._select_scv(unit_type)
+        
+        # [Action 12] 建造飛彈砲台 (100 M)
+        elif action_id == 12:
+            if player.minerals >= 100 and actions.FUNCTIONS.Build_MissileTurret_screen.id in available:
+                return actions.FUNCTIONS.Build_MissileTurret_screen("now", grid_pos)
+            return self._select_scv(unit_type)
+
+        # [Action 13] 建造碉堡 (100 M)
+        elif action_id == 13:
+            if player.minerals >= 100 and actions.FUNCTIONS.Build_Bunker_screen.id in available:
+                return actions.FUNCTIONS.Build_Bunker_screen("now", grid_pos)
+            return self._select_scv(unit_type)
+        
+        # --- [Action 14-32] 單位生產指令集 ---
+
+        # [Action 14] 製造太空工程車 (SCV) - 50 M
+        elif action_id == 14:
+            if player.minerals >= 50 and actions.FUNCTIONS.Train_SCV_quick.id in available:
+                return actions.FUNCTIONS.Train_SCV_quick("now")
+            return self._select_unit(unit_type, COMMAND_CENTER_ID)
+
+        # [Action 15] 製造礦騾 (MULE) - 修正後的魯棒寫法
+        elif action_id == 15:
+            mule_action = None
+            # 嘗試兩種常見的 pysc2 動作名稱
+            for act_name in ["Call_OrbitalCommand_Mule_screen", "Effect_OrbitalCommand_Mule_screen"]:
+                try:
+                    mule_action = getattr(actions.FUNCTIONS, act_name)
+                    break # 找到就跳出
+                except KeyError:
+                    continue
+
+            if mule_action and mule_action.id in available:
+                y_m, x_m = (unit_type == MINERAL_FIELD_ID).nonzero()
+                if x_m.any():
+                    target = (int(x_m.mean()), int(y_m.mean()))
+                    return mule_action("now", target)
+            return self._select_unit(unit_type, ORBITAL_COMMAND_ID)
+
+        # [Action 16] 製造陸戰隊 (Marine) - 50 M
+        elif action_id == 16:
+            if player.minerals >= 50 and actions.FUNCTIONS.Train_Marine_quick.id in available:
+                return actions.FUNCTIONS.Train_Marine_quick("now")
+            return self._select_unit(unit_type, BARRACKS_ID)
+
+        # [Action 17] 製造死神 (Reaper) - 50 M, 50 V
+        elif action_id == 17:
+            if player.minerals >= 50 and player.vespene >= 50 and actions.FUNCTIONS.Train_Reaper_quick.id in available:
+                return actions.FUNCTIONS.Train_Reaper_quick("now")
+            return self._select_unit(unit_type, BARRACKS_ID)
+
+        # [Action 18] 製造掠奪者 (Marauder) - 100 M, 25 V
+        elif action_id == 18:
+            if player.minerals >= 100 and player.vespene >= 25 and actions.FUNCTIONS.Train_Marauder_quick.id in available:
+                return actions.FUNCTIONS.Train_Marauder_quick("now")
+            return self._select_unit(unit_type, BARRACKS_ID)
+
+        # [Action 19] 製造幽靈特務 (Ghost) - 150 M, 125 V
+        elif action_id == 19:
+            if player.minerals >= 150 and player.vespene >= 125 and actions.FUNCTIONS.Train_Ghost_quick.id in available:
+                return actions.FUNCTIONS.Train_Ghost_quick("now")
+            return self._select_unit(unit_type, BARRACKS_ID)
+
+        # [Action 20] 製造惡狼 (Hellion) - 100 M
+        elif action_id == 20:
+            if player.minerals >= 100 and actions.FUNCTIONS.Train_Hellion_quick.id in available:
+                return actions.FUNCTIONS.Train_Hellion_quick("now")
+            return self._select_unit(unit_type, FACTORY_ID)
+
+        # [Action 21] 製造戰狼 (Hellbat) - 100 M (需兵工廠)
+        elif action_id == 21:
+            if player.minerals >= 100 and actions.FUNCTIONS.Train_Hellbat_quick.id in available:
+                return actions.FUNCTIONS.Train_Hellbat_quick("now")
+            return self._select_unit(unit_type, FACTORY_ID)
+
+        # [Action 22] 製造寡婦詭雷 (Widow Mine) - 75 M, 25 V
+        elif action_id == 22:
+            if player.minerals >= 75 and player.vespene >= 25 and actions.FUNCTIONS.Train_WidowMine_quick.id in available:
+                return actions.FUNCTIONS.Train_WidowMine_quick("now")
+            return self._select_unit(unit_type, FACTORY_ID)
+
+        # [Action 23] 製造工程坦克 (Siege Tank) - 150 M, 125 V
+        elif action_id == 23:
+            if player.minerals >= 150 and player.vespene >= 125 and actions.FUNCTIONS.Train_SiegeTank_quick.id in available:
+                return actions.FUNCTIONS.Train_SiegeTank_quick("now")
+            return self._select_unit(unit_type, FACTORY_ID)
+
+        # [Action 24] 製造颶風飛彈車 (Cyclone) - 150 M, 100 V
+        elif action_id == 24:
+            if player.minerals >= 150 and player.vespene >= 100 and actions.FUNCTIONS.Train_Cyclone_quick.id in available:
+                return actions.FUNCTIONS.Train_Cyclone_quick("now")
+            return self._select_unit(unit_type, FACTORY_ID)
+
+        # [Action 25] 製造雷神 (Thor) - 300 M, 200 V
+        elif action_id == 25:
+            if player.minerals >= 300 and player.vespene >= 200 and actions.FUNCTIONS.Train_Thor_quick.id in available:
+                return actions.FUNCTIONS.Train_Thor_quick("now")
+            return self._select_unit(unit_type, FACTORY_ID)
+
+        # [Action 26] 製造維京戰機 (Viking) - 150 M, 75 V
+        elif action_id == 26:
+            if player.minerals >= 150 and player.vespene >= 75 and actions.FUNCTIONS.Train_VikingFighter_quick.id in available:
+                return actions.FUNCTIONS.Train_VikingFighter_quick("now")
+            return self._select_unit(unit_type, STARPORT_ID)
+
+        # [Action 27] 製造醫療艇 (Medivac) - 100 M, 100 V
+        elif action_id == 27:
+            if player.minerals >= 100 and player.vespene >= 100 and actions.FUNCTIONS.Train_Medivac_quick.id in available:
+                return actions.FUNCTIONS.Train_Medivac_quick("now")
+            return self._select_unit(unit_type, STARPORT_ID)
+
+        # [Action 28] 製造解放者 (Liberator) - 150 M, 150 V
+        elif action_id == 28:
+            if player.minerals >= 150 and player.vespene >= 150 and actions.FUNCTIONS.Train_Liberator_quick.id in available:
+                return actions.FUNCTIONS.Train_Liberator_quick("now")
+            return self._select_unit(unit_type, STARPORT_ID)
+
+        # [Action 29] 製造渡鴉 (Raven) - 100 M, 200 V
+        elif action_id == 29:
+            if player.minerals >= 100 and player.vespene >= 200 and actions.FUNCTIONS.Train_Raven_quick.id in available:
+                return actions.FUNCTIONS.Train_Raven_quick("now")
+            return self._select_unit(unit_type, STARPORT_ID)
+
+        # [Action 30] 製造戰巡艦 (Battlecruiser) - 400 M, 300 V
+        elif action_id == 30:
+            if player.minerals >= 400 and player.vespene >= 300 and actions.FUNCTIONS.Train_Battlecruiser_quick.id in available:
+                return actions.FUNCTIONS.Train_Battlecruiser_quick("now")
+            return self._select_unit(unit_type, STARPORT_ID)
+
+        # [Action 31] 製造女妖轟炸機 (Banshee) - 150 M, 100 V
+        elif action_id == 31:
+            if player.minerals >= 150 and player.vespene >= 100 and actions.FUNCTIONS.Train_Banshee_quick.id in available:
+                return actions.FUNCTIONS.Train_Banshee_quick("now")
+            return self._select_unit(unit_type, STARPORT_ID)
+
+        # [Action 32] 升級為行星要塞 (Planetary Fortress) - 150 M, 150 V
+        elif action_id == 32:
+            if player.minerals >= 150 and player.vespene >= 150 and actions.FUNCTIONS.Morph_PlanetaryFortress_quick.id in available:
+                return actions.FUNCTIONS.Morph_PlanetaryFortress_quick("now")
+            return self._select_unit(unit_type, COMMAND_CENTER_ID)
+        
+        # [Action 33] 補給站上升或下降 (自動切換)
+        elif action_id == 33:
+            if actions.FUNCTIONS.Morph_SupplyDepot_Lower_quick.id in available:
+                return actions.FUNCTIONS.Morph_SupplyDepot_Lower_quick("now")
+            if actions.FUNCTIONS.Morph_SupplyDepot_Raise_quick.id in available:
+                return actions.FUNCTIONS.Morph_SupplyDepot_Raise_quick("now")
+            return self._select_unit(unit_type, SUPPLY_DEPOT_ID)
+
+        # [Action 34] 兵營升級 (奇數: 科技實驗室 / 偶數: 反應爐)
+        elif action_id == 34:
+            if self.active_parameter % 2 == 1: # 奇數分支
+                if player.minerals >= 50 and player.vespene >= 25 and actions.FUNCTIONS.Build_TechLab_Barracks_quick.id in available:
+                    return actions.FUNCTIONS.Build_TechLab_Barracks_quick("now")
+            else: # 偶數分支
+                if player.minerals >= 50 and player.vespene >= 50 and actions.FUNCTIONS.Build_Reactor_Barracks_quick.id in available:
+                    return actions.FUNCTIONS.Build_Reactor_Barracks_quick("now")
+            return self._select_unit(unit_type, BARRACKS_ID)
+
+        # [Action 35] 軍工廠升級 (奇數: 科技實驗室 / 偶數: 反應爐)
+        elif action_id == 35:
+            if self.active_parameter % 2 == 1:
+                if player.minerals >= 50 and player.vespene >= 25 and actions.FUNCTIONS.Build_TechLab_Factory_quick.id in available:
+                    return actions.FUNCTIONS.Build_TechLab_Factory_quick("now")
+            else:
+                if player.minerals >= 50 and player.vespene >= 50 and actions.FUNCTIONS.Build_Reactor_Factory_quick.id in available:
+                    return actions.FUNCTIONS.Build_Reactor_Factory_quick("now")
+            return self._select_unit(unit_type, FACTORY_ID)
+
+        # [Action 36] 星際港升級 (奇數: 科技實驗室 / 偶數: 反應爐)
+        elif action_id == 36:
+            if self.active_parameter % 2 == 1:
+                if player.minerals >= 50 and player.vespene >= 25 and actions.FUNCTIONS.Build_TechLab_Starport_quick.id in available:
+                    return actions.FUNCTIONS.Build_TechLab_Starport_quick("now")
+            else:
+                if player.minerals >= 50 and player.vespene >= 50 and actions.FUNCTIONS.Build_Reactor_Starport_quick.id in available:
+                    return actions.FUNCTIONS.Build_Reactor_Starport_quick("now")
+            return self._select_unit(unit_type, STARPORT_ID)
+
+        # [Action 37] 核融合核心升級 (奇數: 大和砲 / 偶數: 戰巡艦加速)
+        elif action_id == 37:
+            act_name = "Research_BattlecruiserWeaponRefit_quick" if self.active_parameter % 2 == 1 else "Research_BattlecruiserTacticalJump_quick"
+            res_act = self._get_safe_func(act_name)
+            if res_act and res_act.id in available and player.minerals >= 150 and player.vespene >= 150:
+                return res_act("now")
+            return self._select_unit(unit_type, FUSION_CORE_ID)
+
+        # [Action 38] 電機工程所升級 (奇數: 步兵攻擊 / 偶數: 步兵防禦)
+        elif action_id == 38:
+            act_name = "Research_TerranInfantryWeapons_quick" if self.active_parameter % 2 == 1 else "Research_TerranInfantryArmor_quick"
+            res_act = self._get_safe_func(act_name)
+            # 注意：若以上名稱失敗，嘗試 Level1 版本
+            if not res_act:
+                act_name = "Research_TerranInfantryWeaponsLevel1_quick" if self.active_parameter % 2 == 1 else "Research_TerranInfantryArmorLevel1_quick"
+                res_act = self._get_safe_func(act_name)
+            
+            if res_act and res_act.id in available and player.minerals >= 100 and player.vespene >= 100:
+                return res_act("now")
+            return self._select_unit(unit_type, ENGINEERING_BAY_ID)
+
+        # [Action 39] 幽靈特務學院升級 (修正 KeyError)
+        elif action_id == 39:
+            # 修正名稱：隱形通常為 PersonalCloaking
+            act_name = "Research_PersonalCloaking_quick" if self.active_parameter % 2 == 1 else "Research_GhostMoebiusReactor_quick"
+            res_act = self._get_safe_func(act_name)
+            if res_act and res_act.id in available:
+                return res_act("now")
+            return self._select_unit(unit_type, GHOST_ACADEMY_ID)
+        
+        # [Action 40]移動視角
         elif action_id == 40:
         # 使用剛剛存入的 active_parameter (1-16)
             block_id = self.active_parameter
@@ -312,13 +601,13 @@ class ProductionAI:
 # =========================================================
 # 🎮 主程式啟動器 (無限對局循環)
 # =========================================================
+# --- 修改 production_ai.py 的最後測試部分 ---
 def main(argv):
     del argv
     agent = ProductionAI()
     with sc2_env.SC2Env(
         map_name="Simple64",
-        players=[sc2_env.Agent(sc2_env.Race.terran), 
-                 sc2_env.Agent(sc2_env.Race.terran)],
+        players=[sc2_env.Agent(sc2_env.Race.terran), sc2_env.Agent(sc2_env.Race.terran)],
         agent_interface_format=sc2_env.AgentInterfaceFormat(
             feature_dimensions=sc2_env.Dimensions(screen=84, minimap=64),
             use_raw_units=False),
@@ -329,11 +618,14 @@ def main(argv):
             print("--- 啟動新對局 ---")
             obs_list = env.reset()
             while True:
-                # 隨機選擇動作測試 (0-9)
-                action_id = 2#random.randint(0, 9)
-                param = random.randint(1, 16) 
+                action_id = random.randint(1, 40)
+                param = random.randint(1, 16) # 網格限制 1-16
+                
                 sc2_action = agent.get_action(obs_list[0], action_id, parameter=param)
-                obs_list = env.step([sc2_action])
+                
+                # 同時傳入兩位玩家的指令
+                obs_list = env.step([sc2_action, actions.FUNCTIONS.no_op()])
+                
                 if obs_list[0].last():
                     break
 
