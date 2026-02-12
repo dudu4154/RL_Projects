@@ -37,14 +37,15 @@ class DataCollector:
         self.filename = f"logs/terran_log_{int(time.time())}.csv"
         with open(self.filename, mode='w', newline='') as file:
             writer = csv.writer(file)
-            writer.writerow(["Time", "Minerals", "Vespene", "Workers", "Ideal", "Action_ID"])
+            # 【新增】加入 Barracks 欄位
+            writer.writerow(["Time", "Minerals", "Vespene", "Workers", "Ideal", "Barracks", "Action_ID"])
 
-    def log_step(self, time_val, minerals, vespene, workers, ideal, action_id):
-        # 轉為 float 以避免 NumPy 類型在 round 時報錯
+    def log_step(self, time_val, minerals, vespene, workers, ideal, barracks, action_id):
+        # 【更新】接收並寫入 barracks 參數
         display_time = float(time_val[0]) if hasattr(time_val, "__len__") else float(time_val)
         with open(self.filename, mode='a', newline='') as file:
             writer = csv.writer(file)
-            writer.writerow([round(display_time, 2), minerals, vespene, workers, ideal, action_id])
+            writer.writerow([round(display_time, 2), minerals, vespene, workers, ideal, barracks, action_id])
 
 # =========================================================
 # 🧠 生產大腦: 整合所有功能與修正
@@ -64,14 +65,8 @@ class ProductionAI:
         self.cc_x_screen = 42
         self.cc_y_screen = 42
         self.gas_workers_assigned = 0
-        
-        # --- 【修正】在這裡初始化參數，避免 AttributeError ---
         self.active_parameter = 1 
-        
-        # 鏡頭管理座標
-        self.base_minimap_coords = None 
-        self.scan_points = []
-        self.current_scan_idx = 0
+        self.base_minimap_coords = None
 
     def _find_units_centers(self, unit_type, unit_id):
         """ 尋找畫面上所有指定 ID 的建築中心點，避免點擊到空地 """
@@ -90,77 +85,46 @@ class ProductionAI:
         return centers
 
     def get_action(self, obs, action_id, parameter=None):
-        # 1. 優先處理參數更新，確保後面計算 grid_pos 不會出錯
+        # 1. 更新當前參數
         if parameter is not None:
             self.active_parameter = parameter
         
-        # 2. 計算 4x4 建築網格座標 (用於畫面 84x84)
-        b_id = self.active_parameter
-        row, col = (b_id - 1) // 4, (b_id - 1) % 4
-        jitter_range = 8  # 在 21 像素的範圍內，上下左右偏移 8 像素
-        offset_x = random.randint(-jitter_range, jitter_range)
-        offset_y = random.randint(-jitter_range, jitter_range)
-
-        grid_pos = (
-            np.clip(int((col + 0.5) * 21) + offset_x, 0, 83),
-            np.clip(int((row + 0.5) * 21) + offset_y, 0, 83)
-        )
-
+        # 2. 獲取基本特徵層
         unit_type = obs.observation.feature_screen[features.SCREEN_FEATURES.unit_type.index]
         player = obs.observation.player
         available = obs.observation.available_actions
-
-        # --- 更新通用參數暫存區 ---
-        if parameter is not None:
-            self.active_parameter = parameter
-        elif not hasattr(self, 'active_parameter'):
-            self.active_parameter = 1 # 初始預設值
-
-        # --- 1. 座標與防禦型掃描點初始化 (在這裡加入判斷) ---
-        if self.base_minimap_coords is None:
-            global BASE_LOCATION_CODE  # 宣告使用全域變數
-            
-            player_relative_mini = obs.observation.feature_minimap[features.MINIMAP_FEATURES.player_relative.index]
-            y_mini, x_mini = (player_relative_mini == features.PlayerRelative.SELF).nonzero()
-            
-            if x_mini.any():
-                bx, by = int(x_mini.mean()), int(y_mini.mean())
-                self.base_minimap_coords = (bx, by)
-                
-                # 【新增】在這裡直接判斷並寫入全域變數
-                # bx > 32 (右側) 且 by > 32 (下側) = 右下角
-                if bx > 32 and by > 32:
-                    BASE_LOCATION_CODE = 1
-                else:
-                    BASE_LOCATION_CODE = 0
-                
-                # 以基地為中心擴散的掃描點
-                offsets = [(0, 0), (20, 0), (-20, 0), (0, 20), (0, -20), (15, 15), (-15, -15)]
-                self.scan_points = [(np.clip(bx + dx, 0, 63), np.clip(by + dy, 0, 63)) for dx, dy in offsets]
-        # --- 2. 視角跳轉邏輯 (修正關鍵) ---
-        cc_y, cc_x = (unit_type == COMMAND_CENTER_ID).nonzero()
         
-        # Action 9 (開礦): 若畫面看得到主基，說明還沒跳轉到礦區
-        if action_id == 9 and cc_x.any():
-            return actions.FUNCTIONS.move_camera(self.scan_points[1]) # 跳轉到第一個擴散點
-
-        # Action 0-7 (基礎營運): 若畫面沒基地，強制拉回主基地
-        if action_id <= 7 and not cc_x.any() and self.base_minimap_coords:
-            return actions.FUNCTIONS.move_camera(self.base_minimap_coords)
-
-        # 更新基地在螢幕中的座標
+        # 3. 定義基地座標 (修復 NameError)
+        cc_y, cc_x = (unit_type == COMMAND_CENTER_ID).nonzero()
         if cc_x.any():
             self.cc_x_screen, self.cc_y_screen = int(cc_x.mean()), int(cc_y.mean())
 
-        # 動態工兵飽和計算
-        current_workers = player.food_workers
-        refinery_pixels = np.sum(unit_type == REFINERY_ID)
-        refinery_count = int(refinery_pixels / 80) # 改用 80 像素作為門檻，解決識別錯誤
-        ideal_workers = 16 + (refinery_count * 3)
-        self.collector.log_step(obs.observation.game_loop, player.minerals, 
-                                player.vespene, current_workers, ideal_workers, action_id)
+        # 4. 計算建築網格座標 (84x84 螢幕)
+        b_id = self.active_parameter
+        row, col = (b_id - 1) // 4, (b_id - 1) % 4
+        jitter = random.randint(-8, 8)
+        grid_pos = (np.clip(int((col + 0.5) * 21) + jitter, 0, 83), 
+                    np.clip(int((row + 0.5) * 21) + jitter, 0, 83))
 
-        # --- 3. 完整動作邏輯分支 ---
+        # 5. 初始基地位置偵測 (僅用於統計，不觸發視角移動)
+        if self.base_minimap_coords is None:
+            m_relative = obs.observation.feature_minimap[features.MINIMAP_FEATURES.player_relative.index]
+            my_y, my_x = (m_relative == 1).nonzero()
+            if my_x.any():
+                bx, by = int(my_x.mean()), int(my_y.mean())
+                self.base_minimap_coords = (bx, by)
+                global BASE_LOCATION_CODE
+                BASE_LOCATION_CODE = 1 if (bx > 32 and by > 32) else 0
+
+        # 6. 統計數據紀錄
+        m_unit = obs.observation.feature_minimap[features.MINIMAP_FEATURES.unit_type.index]
+        m_rel = obs.observation.feature_minimap[features.MINIMAP_FEATURES.player_relative.index]
+        barracks_count = np.sum((m_unit == BARRACKS_ID) & (m_rel == 1))
+        
+        self.collector.log_step(obs.observation.game_loop, player.minerals, 
+                                player.vespene, player.food_workers, 
+                                16 + (int(np.sum(unit_type == REFINERY_ID)/80)*3), 
+                                barracks_count, action_id)
 
         '''# [Action 1] 訓練 SCV (飽和度檢查)
         if action_id == 1:
@@ -233,7 +197,6 @@ class ProductionAI:
                 return actions.FUNCTIONS.Build_SupplyDepot_screen("now", grid_pos)
             return self._select_scv(unit_type, available)
         
-        # [Action 2] 建造兵營 (自動位移邏輯)
         elif action_id == 2:
             if player.minerals >= 150 and actions.FUNCTIONS.Build_Barracks_screen.id in available:
                 return actions.FUNCTIONS.Build_Barracks_screen("now", grid_pos)
@@ -286,11 +249,12 @@ class ProductionAI:
                 return actions.FUNCTIONS.Build_Armory_screen("now", grid_pos)
             return self._select_scv(unit_type, available)
         
-        # [Action 11] 建造瓦斯廠 (精確中心鎖定)
+        # [Action 11] 建造瓦斯廠
         elif action_id == 11:
             if player.minerals >= 75 and actions.FUNCTIONS.Build_Refinery_screen.id in available:
                 self.refinery_target = self._find_geyser(unit_type)
                 if self.refinery_target:
+                    # 這裡會回傳湧泉的中心座標 (x, y)
                     return actions.FUNCTIONS.Build_Refinery_screen("now", self.refinery_target)
             return self._select_scv(unit_type, available)
         
@@ -527,43 +491,62 @@ class ProductionAI:
         
         # [Action 40]移動視角
         elif action_id == 40:
-        # 使用剛剛存入的 active_parameter (1-16)
-            block_id = self.active_parameter
-            
-            # 4x4 網格計算邏輯
-            row = (block_id - 1) // 4
-            col = (block_id - 1) % 4
-            target_x = int((col + 0.5) * 16)
-            target_y = int((row + 0.5) * 16)
-            
-            final_pos = (np.clip(target_x, 0, 63), np.clip(target_y, 0, 63))
-            # print(f"[Action 40] 視角切換至網格 {block_id}: {final_pos}")
-            return actions.FUNCTIONS.move_camera(final_pos)
+                    block_id = self.active_parameter
+                    r, c = (block_id - 1) // 4, (block_id - 1) % 4
+                    target_pos = (np.clip(int((c + 0.5) * 16), 0, 63), 
+                                np.clip(int((r + 0.5) * 16), 0, 63))
+                    return actions.FUNCTIONS.move_camera(target_pos)
 
+        # [Action 41] 將當前選中單位設為編隊 1 (Ctrl + 1)
+        # [Action 41] 真正的人族技巧：將主堡編為編隊 1
+        elif action_id == 41:
+            # 1. 檢查當前選中單位是否為主堡 (ID 18)
+            is_cc_selected = False
+            
+            # 檢查單選清單
+            if len(obs.observation.single_select) > 0:
+                if obs.observation.single_select[0].unit_type == COMMAND_CENTER_ID:
+                    is_cc_selected = True
+            # 檢查多選清單 (以防萬一選到多個單位)
+            elif len(obs.observation.multi_select) > 0:
+                if obs.observation.multi_select[0].unit_type == COMMAND_CENTER_ID:
+                    is_cc_selected = True
+
+            # 2. 邏輯判斷：已選中就編隊，未選中就去選
+            if is_cc_selected:
+                if actions.FUNCTIONS.select_control_group.id in available:
+                    # print("⌨️ 成功執行 Ctrl + 1 (設定編隊 1)")
+                    return actions.FUNCTIONS.select_control_group("set", 1)
+            else:
+                # 若沒選中，執行選取主堡動作
+                # 注意：這需要視角看著主堡才能成功
+                return self._select_unit(unit_type, COMMAND_CENTER_ID)
+        # [Action 42] 選取編隊 1 並跳轉視角到該處
+        elif action_id == 42:
+            if actions.FUNCTIONS.select_control_group.id in available:
+                # "recall" 會選取該編隊，若搭配正確參數甚至能直接跳轉視角
+                return actions.FUNCTIONS.select_control_group("recall", 1)
+            return actions.FUNCTIONS.no_op()
         return actions.FUNCTIONS.no_op()
 
     # --- 內部輔助函式 ---
     def _select_unit(self, unit_type, unit_id):
+        # 使用歸屬過濾 (Relative == 1) 避免點到敵人的東西
         y, x = (unit_type == unit_id).nonzero()
         if x.any():
+            # 取中心點點擊
             return actions.FUNCTIONS.select_point("select", (int(x.mean()), int(y.mean())))
         return actions.FUNCTIONS.no_op()
 
     # --- 修改後的選取工兵邏輯 ---
     def _select_scv(self, unit_type, available):
-        """ 優先選取空閒工兵，若無空閒則從畫面隨機選取 """
-        
-        # 1. 優先判斷是否有空閒工兵 (select_idle_worker)
         if actions.FUNCTIONS.select_idle_worker.id in available:
             return actions.FUNCTIONS.select_idle_worker("select")
-            
-        # 2. 如果沒有空閒工兵，才執行原本的畫面隨機點擊邏輯
         y, x = (unit_type == SCV_ID).nonzero()
         if x.any():
             idx = random.randint(0, len(x) - 1)
             return actions.FUNCTIONS.select_point("select", (x[idx], y[idx]))
-            
-        return actions.FUNCTIONS.no_op()
+        return actions.FUNCTIONS.no_op() # 如果視角不對，這裡會一直回傳 no_op
 
     def _select_scv_filtered(self, unit_type, target, available): # 這裡要加 available
         """ 選取遠離目標資源點的工兵，避免拉走正在採氣的人 """
@@ -650,8 +633,8 @@ def main(argv):
             print("--- 啟動新對局 ---")
             obs_list = env.reset()
             while True:
-                action_id = random.choice([1, 2, 11, 18, 34])#random.randint(1, 40)
-                param = 1#random.randint(1, 16) # 網格限制 1-16
+                action_id = random.choice([41,42])#random.randint(1, 40)##
+                param = random.randint(1, 16)#1# # 網格限制 1-16
                 
                 sc2_action = agent.get_action(obs_list[0], action_id, parameter=param)
                 

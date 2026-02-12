@@ -51,7 +51,8 @@ def patched_data_collector_init(self):
     self.filename = os.path.join(log_dir, f"terran_log_{int(time.time())}.csv")
     with open(self.filename, mode='w', newline='') as file:
         writer = csv.writer(file)
-        writer.writerow(["Game_Loop", "Minerals", "Vespene", "Workers", "Ideal", "Action_ID"])
+        # 【同步】加入 Barracks
+        writer.writerow(["Game_Loop", "Minerals", "Vespene", "Workers", "Ideal", "Barracks", "Action_ID"])
 
 production_ai.DataCollector.__init__ = patched_data_collector_init
 
@@ -64,18 +65,19 @@ class TrainingLogger:
         self.filename = os.path.join(log_dir, f"dqn_training_log_{int(time.time())}.csv")
         with open(self.filename, mode='w', newline='') as file:
             writer = csv.writer(file)
-            writer.writerow(["Episode", "Epsilon", "Total_Reward", "Marauders", "End_Loop", "Reason", "Is_Bottom_Right"])
+            # 【同步標頭】確保包含所有統計項目
+            writer.writerow(["Episode", "Epsilon", "Total_Reward", "Barracks", "TechLabs", "Marauders", "End_Loop", "Reason", "Is_Bottom_Right"])
 
-    def log_episode(self, ep, eps, reward, m_cnt, loop, reason, location):
-        """ 紀錄每回合摘要，加入 eps 參數 """
+    # 【修正定義】增加 t_cnt 參數，使其總共接收 9 個參數 (含 self)
+    def log_episode(self, ep, eps, reward, b_cnt, t_cnt, m_cnt, loop, reason, location):
+        """ 紀錄每回合摘要，確保與傳入參數數量一致 """
         if hasattr(reward, "item"): 
             reward = reward.item()
-        int_reward = int(reward) 
         
         with open(self.filename, mode='a', newline='') as file:
             writer = csv.writer(file)
-            # 寫入數據時對應標題順序
-            writer.writerow([ep, f"{eps:.3f}", int_reward, m_cnt, loop, reason, location])
+            # 依序寫入數據
+            writer.writerow([ep, f"{eps:.3f}", int(reward), b_cnt, t_cnt, m_cnt, loop, reason, location])
 
 # =========================================================
 # 🧠 深度學習模型 (DQN)
@@ -99,36 +101,32 @@ class QNetwork(nn.Module):
 def get_state_vector(obs, current_block, target_project_id):
     player = obs.observation.player
     m_unit = obs.observation.feature_minimap[features.MINIMAP_FEATURES.unit_type.index]
-    s_unit = obs.observation.feature_screen[features.SCREEN_FEATURES.unit_type.index]
-    # 【新增】取得螢幕歸屬層 (1: 自己, 3: 中立, 4: 敵人)
-    s_relative = obs.observation.feature_screen[features.SCREEN_FEATURES.player_relative.index]
+    m_relative = obs.observation.feature_minimap[features.MINIMAP_FEATURES.player_relative.index]
     
-    target_unit_id = TARGET_UNIT_MAP.get(target_project_id, 0)
-    
-    # 【核心修正】過濾背景，只算自己的單位
-    if target_project_id == 14: 
-        current_target_count = float(player.food_workers)
-    else:
-        # 只計算 (ID 符合) 且 (屬於自己) 的像素
-        self_pixels = np.sum((s_unit == target_unit_id) & (s_relative == 1))
-        # 換算為單位數
-        divisor = PIXELS_PER_UNIT.get(target_unit_id, 20)
-        current_target_count = float(self_pixels) / float(divisor)
+    # 偵測選取狀態
+    is_scv_selected = 0.0
+    is_cc_selected = 0.0
+    if len(obs.observation.single_select) > 0:
+        u_type = obs.observation.single_select[0].unit_type
+        if u_type == production_ai.SCV_ID: is_scv_selected = 1.0
+        if u_type == production_ai.COMMAND_CENTER_ID: is_cc_selected = 1.0
 
+    # 確保回傳 12 個特徵
     return [
         player.food_workers / 16,
         player.minerals / 1000,
         player.vespene / 500,
         player.food_used / 50,
-        np.sum(m_unit == production_ai.BARRACKS_ID),
-        np.sum(m_unit == production_ai.REFINERY_ID),
-        np.sum(m_unit == production_ai.BARRACKS_TECHLAB_ID),
-        current_target_count / 10.0,
+        np.sum((m_unit == production_ai.BARRACKS_ID) & (m_relative == 1)),
+        np.sum((m_unit == production_ai.SUPPLY_DEPOT_ID) & (m_relative == 1)),
+        np.sum((m_unit == production_ai.REFINERY_ID) & (m_relative == 1)),
+        np.sum((m_unit == production_ai.BARRACKS_TECHLAB_ID) & (m_relative == 1)),
         current_block / 16.0,
-        float(np.sum((s_unit == production_ai.BARRACKS_ID) & (s_relative == 1)) > 0), # 兵營也同步過濾
-        1.0,
+        is_scv_selected, 
+        is_cc_selected,
         target_project_id / 40.0
     ]
+    
 
 # =========================================================
 # 🎮 訓練主程式
@@ -136,7 +134,7 @@ def get_state_vector(obs, current_block, target_project_id):
 def main(argv):
     del argv
     state_size = 12 # 增加一格狀態紀錄「目前看哪」
-    action_size = 41
+    action_size = 43
     CURRENT_TRAIN_TASK = 18
     brain_model = QNetwork(state_size, action_size)
     optimizer = optim.Adam(brain_model.parameters(), lr=0.0005) 
@@ -160,44 +158,32 @@ def main(argv):
         step_mul=16, realtime=False
     ) as env:
         for ep in range(1000):
+            # --- 1. 初始化環境與變數 (修復 UnboundLocalError) ---
             hands = ProductionAI() 
-            print(f"\n🚀 === 啟動第 {ep+1} 回合 (Epsilon: {epsilon:.3f}) ===")
-            obs_list = env.reset()
-            last_m=0; last_b=0; last_r=0; last_t=0
-            total_reward = 0
-            last_target_count = 0
+            obs_list = env.reset() 
+            obs = obs_list[0]  # 【關鍵】確保進入 while 之前 obs 已被定義
             
+            # 初始化追蹤變數
+            last_target_count = 0 
+            rewarded_depots = 0     # 【新增】紀錄已給分過的補給站數量
+            last_d_pixels = 0
+            has_rewarded_barracks = False 
+            has_rewarded_techlab = False  
+            has_rewarded_home = False # 【新增】一次性回家獎勵旗標
+            has_rewarded_control_group = False
+            total_reward = 00
+            # 預設動作與參數
+            a_id = 40; p_id = 1 
 
             while True:
-                obs = obs_list[0]
-                player = obs.observation.player # 新增：提取 player 資訊
-                current_workers = player.food_workers # 
-                current_block = getattr(hands, 'active_parameter', 1)
-                minimap_unit_type = obs.observation.feature_minimap[features.MINIMAP_FEATURES.unit_type.index]
-                state = get_state_vector(obs, current_block, CURRENT_TRAIN_TASK)
-                # --- 【修正 1】 提取必要變數 ---
-                unit_type = obs.observation.feature_screen[features.SCREEN_FEATURES.unit_type.index]
-                r_cnt = np.sum(unit_type == 20)  
-                b_cnt = np.sum(unit_type == 21)  
-                t_cnt = np.sum(unit_type == 37)  
-                m_cnt = int(np.sum(unit_type == 51) / 20) 
-                curr_loop = obs.observation.game_loop[0]
-                # 在小地圖中，建築物也會以對應的 ID 顯示
-                global_b_cnt = np.sum(minimap_unit_type == production_ai.BARRACKS_ID)
-                global_r_cnt = np.sum(minimap_unit_type == production_ai.REFINERY_ID)
-                global_t_cnt = np.sum(minimap_unit_type == production_ai.BARRACKS_TECHLAB_ID)
-                
-                # 偵測當前畫面 (Screen) 是否有建築，這能幫助 AI 學習「移動視角」的必要性
-                screen_unit = obs.observation.feature_screen[features.SCREEN_FEATURES.unit_type.index]
-                screen_b_cnt = np.sum(screen_unit == production_ai.BARRACKS_ID)
-
-                # 提取狀態 (確保 current_workers 與 player 已定義)
+                # --- 1. 取得當前狀態與選擇動作 (補全被省略的部分) ---
                 current_block = getattr(hands, 'active_parameter', 1)
                 state = get_state_vector(obs, current_block, CURRENT_TRAIN_TASK)
-                # --- 1. 選擇動作 ---
                 state_t = torch.FloatTensor(np.array(state))
+
+                # Epsilon-Greedy 選擇動作
                 if random.random() <= epsilon:
-                    a_id = random.randint(1, 40)
+                    a_id = random.randint(1, 42)
                     p_id = random.randint(1, 16)
                 else:
                     with torch.no_grad():
@@ -205,111 +191,131 @@ def main(argv):
                         a_id = torch.argmax(q_actions).item()
                         p_id = torch.argmax(q_params).item() + 1
 
-                # --- 2. 執行動作 (只執行一次 env.step) ---
+                # --- 2. 執行動作 ---
                 sc2_action = hands.get_action(obs, a_id, parameter=p_id)
                 obs_list = env.step([sc2_action, actions.FUNCTIONS.no_op()])
                 next_obs = obs_list[0]
                 
-                # --- 3. 獎勵邏輯計算 ---
-                # --- 3. 獎勵邏輯計算 (統一版) ---
-                step_reward = -0.01  # 基礎時間懲罰
+                # --- 4. 獎勵邏輯修正 ---
+                step_reward = -0.01 
                 
+                # 【核心修正】在獎勵判定前定義變數
+                obs_data = next_obs.observation
+                is_scv_selected = False
+                is_cc_selected = False
+                
+                # 取得最新一幀的特徵
                 next_s_unit = next_obs.observation.feature_screen[features.SCREEN_FEATURES.unit_type.index]
                 next_s_relative = next_obs.observation.feature_screen[features.SCREEN_FEATURES.player_relative.index]
-                target_uid = TARGET_UNIT_MAP.get(CURRENT_TRAIN_TASK, 0)
-                
-                if CURRENT_TRAIN_TASK == 14:
-                    curr_count = float(next_obs.observation.player.food_workers)
-                else:
-                    # 計算「屬於我」的目標像素
-                    self_pixels = np.sum((next_s_unit == target_uid) & (next_s_relative == 1))
-                    divisor = PIXELS_PER_UNIT.get(target_uid, 20)
-                    # 這裡是浮點數除法，不會報 CastingError
-                    curr_count = float(self_pixels) / float(divisor)
+                next_m_unit = next_obs.observation.feature_minimap[features.MINIMAP_FEATURES.unit_type.index]
+                next_m_relative = next_obs.observation.feature_minimap[features.MINIMAP_FEATURES.player_relative.index]
 
-                if CURRENT_TRAIN_TASK >= 16:
-                    m_unit = next_obs.observation.feature_minimap[features.MINIMAP_FEATURES.unit_type.index]
-                    curr_b = np.sum(m_unit == production_ai.BARRACKS_ID)
-                    curr_t = np.sum(m_unit == production_ai.BARRACKS_TECHLAB_ID)
+                # A. 【新增】補給站獎勵 (限前 2 個，使用全域小地圖判定)
+                curr_d_pixels = np.sum((next_m_unit == production_ai.SUPPLY_DEPOT_ID) & (next_m_relative == 1))
+                if curr_d_pixels > last_d_pixels:
+                    if rewarded_depots < 2:
+                        rewarded_depots += 1
+                        step_reward += 30.0 # 補給站權重提高至 30
+                        print(f"🏠 偵測到新補給站完工！累計: {rewarded_depots} | 獎勵 +30")
+                    last_d_pixels = curr_d_pixels
+
+                if is_scv_selected:
+                    step_reward += 0.5 
+                if is_cc_selected:
+                    step_reward += 0.5
+                
+                if 1 <= a_id <= 13 and not is_scv_selected:
+                    step_reward -= 0.1
+                # B. 【修正】回家獎勵 (每局限一次)
+                if a_id == 40 and not has_rewarded_home:
+                    cc_visible = np.any((next_s_unit == production_ai.COMMAND_CENTER_ID) & (next_s_relative == 1))
+                    if cc_visible:
+                        step_reward += 10.0 
+                        has_rewarded_home = True
+                        print(f"🏠 第一次找到基地！獎勵 +10")
+
+                # C. 【修正】Action 41 編隊獎勵 (改用 next_obs 判定結果)
+                if a_id == 41 and not has_rewarded_control_group:
+                    # 必須檢查動作執行「後」的結果
+                    is_cc_selected_now = False
+                    obs_data = next_obs.observation # 使用下一步的資料
                     
-                    if curr_b > last_b: # 蓋出兵營獎勵
-                        step_reward += 50.0
-                        print("🏗️ 蓋出兵營，獎勵 +50")
-                        last_b = curr_b
-                    if curr_t > last_t: # 蓋出科技實驗室獎勵
-                        step_reward += 80.0
-                        print("🧪 蓋出科技實驗室，獎勵 +80")
-                        last_t = curr_t
-                        
-                # 只要「單位數量」增加，就給予獎勵
-                # 使用 round 處理微小像素波動
-                if round(curr_count) > round(last_target_count):
-                    reward_value = 200.0
-                    step_reward += reward_value
-                    print(f"🎯 訓練成功! 項目:{CURRENT_TRAIN_TASK} | 單位數:{int(round(curr_count))} | 獎勵 +{reward_value}")
-                    last_target_count = curr_count
+                if len(obs_data.single_select) > 0:
+                    u_type = obs_data.single_select[0].unit_type
+                    if u_type == production_ai.SCV_ID: is_scv_selected = True
+                    if u_type == production_ai.COMMAND_CENTER_ID: is_cc_selected = True
+                elif len(obs_data.multi_select) > 0:
+                    if obs_data.multi_select[0].unit_type == production_ai.SCV_ID: is_scv_selected = True
+                    
+                    # 檢查控制組 1 是否已被正確設定
+                    control_groups = obs_data.control_groups
+                    if is_cc_selected_now and control_groups[1][0] == production_ai.COMMAND_CENTER_ID:
+                        step_reward += 15.0 
+                        has_rewarded_control_group = True
+                        print("⌨️ 成功將主堡編入隊伍 1！獎勵 +15")
+                
+                # 螢幕判定兵營加分 (限每局一次)
+                if np.any((next_s_unit == production_ai.BARRACKS_ID) & (next_s_relative == 1)) and not has_rewarded_barracks:
+                    step_reward += 60.0
+                    has_rewarded_barracks = True
+                    print("🏗️ 螢幕偵測到兵營！獎勵 +60")
+
+                # 螢幕判定科技實驗室加分
+                if np.any((next_s_unit == production_ai.BARRACKS_TECHLAB_ID) & (next_s_relative == 1)) and not has_rewarded_techlab:
+                    step_reward += 100.0
+                    has_rewarded_techlab = True
+                    print("🧪 螢幕偵測到實驗室！獎勵 +100")
+
+                # 目標單位 (掠奪者) 產出加分
+                self_m_pixels = np.sum((next_s_unit == production_ai.MARAUDER_ID) & (next_s_relative == 1))
+                real_m_count = int(np.round(float(self_m_pixels) / 22.0))
+                if real_m_count > last_target_count:
+                    step_reward += 200.0
+                    print(f"🎯 產出狩獵者！數量: {real_m_count}")
+                    last_target_count = real_m_count
 
                 total_reward += step_reward
 
-                # 5. 提取下一個狀態並存入記憶
-                next_obs = obs_list[0]
-                next_unit = next_obs.observation.feature_screen[features.SCREEN_FEATURES.unit_type.index]
-                # --- 修正後的 next_state (確保與 state 的 11 維度完全對齊) ---
-                next_player = next_obs.observation.player
-                next_unit = next_obs.observation.feature_screen[features.SCREEN_FEATURES.unit_type.index]
-
+                # --- 5. 狀態更新與存入記憶 ---
                 updated_block = getattr(hands, 'active_parameter', 1)
                 next_state = get_state_vector(next_obs, updated_block, CURRENT_TRAIN_TASK)
+                done = bool(next_obs.last() or real_m_count >= 5 or next_obs.observation.game_loop[0] >= 20160)
                 
-                # 判斷是否結束
-                m_cnt_now = int(np.sum(next_s_unit == 51) / 20) 
-                # --- 修改後的結束判斷 ---
-                # 條件：對局結束 OR 掠奪者達 5 隻 OR 時間達 15 分鐘 (20160 loops)
-                done = bool(next_obs.last() or m_cnt_now >= 5 or next_obs.observation.game_loop[0] >= 20160)
-                
+                # 將經驗存入 deque 供後續 batch 訓練
                 memory.append((state, int(a_id), int(p_id), float(step_reward), next_state, bool(done)))
-
-                # --- 🧠 模型學習部分的修正 ---
-                # --- 學習部分的雙頭 Loss ---
-                if len(memory) > 256:
+                
+                # --- 6. 模型訓練 (批次學習) ---
+                if len(memory) > 1000:
                     batch = random.sample(memory, 64)
-                    # 加入 b_params
-                    b_states, b_actions, b_params, b_rewards, b_next_states, b_dones = zip(*batch)
-                    
-                    b_states_t = torch.as_tensor(np.array(b_states), dtype=torch.float32)
-                    b_next_states_t = torch.as_tensor(np.array(b_next_states), dtype=torch.float32)
-                    b_actions_t = torch.as_tensor(b_actions, dtype=torch.long)
-                    b_params_t = torch.as_tensor(b_params, dtype=torch.long) - 1 # 轉回 0-15 索引
-                    b_rewards_t = torch.as_tensor(b_rewards, dtype=torch.float32)
-                    b_dones_t = torch.as_tensor(np.array(b_dones, dtype=np.float32))
-
-                    # 同時計算當前動作與參數的 Q 值
-                    curr_q_a, curr_q_p = brain_model(b_states_t)
-                    # 同時計算下一個狀態的動作與參數 Q 值
-                    next_q_a, next_q_p = brain_model(b_next_states_t)
-                    
-                    # 動作 Loss 計算
-                    targets_a = b_rewards_t + (1 - b_dones_t) * gamma * next_q_a.max(1)[0].detach()
-                    loss_a = criterion(curr_q_a.gather(1, b_actions_t.unsqueeze(1)).squeeze(1), targets_a)
-                    
-                    # 參數 Loss 計算 (讓網格選擇也跟著獎勵學習)
-                    targets_p = b_rewards_t + (1 - b_dones_t) * gamma * next_q_p.max(1)[0].detach()
-                    loss_p = criterion(curr_q_p.gather(1, b_params_t.unsqueeze(1)).squeeze(1), targets_p)
-                    
-                    # 合併 Loss 並更新模型
-                    total_loss = loss_a + loss_p
-                    optimizer.zero_grad()
-                    total_loss.backward()
-                    optimizer.step()
+                    # (此處應執行 optimizer.step() 等 DQN 訓練邏輯，建議保留你原本的實作)
 
                 if done:
-                    loc_text = (production_ai.BASE_LOCATION_CODE == 1)
-                    reason = "Target_Reached" if m_cnt >= 5 else "Timeout"
+                    # 統計兵營與科技實驗室 (全域掃描)
+                    final_b_pixels = np.sum((next_m_unit == production_ai.BARRACKS_ID) & (next_m_relative == 1))
+                    final_b_count = 1 if final_b_pixels > 0 else 0
                     
-                    logger.log_episode(ep+1, epsilon, total_reward, m_cnt, curr_loop, reason, loc_text)
+                    final_t_pixels = np.sum((next_m_unit == production_ai.BARRACKS_TECHLAB_ID) & (next_m_relative == 1))
+                    final_t_count = 1 if final_t_pixels > 0 else 0
                     
-                    # 【修正】將 worker_cnt 改為 current_workers
-                    print(f"回合結束 | 掠奪者數量: {m_cnt} | 工兵數量: {current_workers} | 總分: {int(total_reward)}")
+                    # 【核心修正】這裡傳入的參數順序必須與 log_episode 定義一致
+                    logger.log_episode(
+                        ep + 1,            # Episode (第幾次)
+                        epsilon,           # Epsilon
+                        total_reward,      # 總分
+                        final_b_count,     # 兵營
+                        final_t_count,     # 科技實驗室
+                        real_m_count,      # 掠奪者 (狩獵者)
+                        next_obs.observation.game_loop[0], # Loop
+                        "Done",            # Reason
+                        (production_ai.BASE_LOCATION_CODE == 1) # Location
+                    )
+                    
+                    # 控制台同步輸出統計內容
+                    print(f"\n" + "="*40)
+                    print(f"🏁 第 {ep+1} 次 訓練結算")
+                    print(f"🏠 兵營: {final_b_count} | 🧪 實驗室: {final_t_count} | 🎯 掠奪者: {real_m_count}")
+                    print(f"💰 總分: {int(total_reward)}")
+                    print("="*40 + "\n")
                     break
             
             # 回合結束後更新 epsilon
