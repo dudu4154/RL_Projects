@@ -135,6 +135,7 @@ def main(argv):
     del argv
     state_size = 12 # 增加一格狀態紀錄「目前看哪」
     action_size = 43
+    train_step_counter = 0
     CURRENT_TRAIN_TASK = 18
     brain_model = QNetwork(state_size, action_size)
     optimizer = optim.Adam(brain_model.parameters(), lr=0.0005) 
@@ -167,23 +168,24 @@ def main(argv):
             last_target_count = 0 
             rewarded_depots = 0     # 【新增】紀錄已給分過的補給站數量
             last_d_pixels = 0
+            scv_reward_count = 0
             has_rewarded_barracks = False 
             has_rewarded_techlab = False  
             has_rewarded_home = False # 【新增】一次性回家獎勵旗標
             has_rewarded_control_group = False
-            total_reward = 00
+            total_reward = 0.0
             # 預設動作與參數
             a_id = 40; p_id = 1 
 
             while True:
-                # --- 1. 取得當前狀態與選擇動作 (補全被省略的部分) ---
+                # --- 1. 取得當前狀態與選擇動作 ---
                 current_block = getattr(hands, 'active_parameter', 1)
                 state = get_state_vector(obs, current_block, CURRENT_TRAIN_TASK)
                 state_t = torch.FloatTensor(np.array(state))
 
-                # Epsilon-Greedy 選擇動作
+                # Epsilon-Greedy 選擇 (a_id 決定做什麼，p_id 決定在哪做)
                 if random.random() <= epsilon:
-                    a_id = random.randint(1, 42)
+                    a_id = random.randint(1, 42) 
                     p_id = random.randint(1, 16)
                 else:
                     with torch.no_grad():
@@ -191,104 +193,132 @@ def main(argv):
                         a_id = torch.argmax(q_actions).item()
                         p_id = torch.argmax(q_params).item() + 1
 
-                # --- 2. 執行動作 ---
+
+                # --- 2. 執行單一動作 (移除原有的自動切換視角邏輯) ---
+                # --- 2. 執行單一動作 ---
+                # --- 2. 執行單一動作 ---
                 sc2_action = hands.get_action(obs, a_id, parameter=p_id)
+                actual_id = hands.locked_action if hands.locked_action is not None else a_id
                 obs_list = env.step([sc2_action, actions.FUNCTIONS.no_op()])
                 next_obs = obs_list[0]
                 
-                # --- 4. 獎勵邏輯修正 ---
+                # --- 3. 提取特徵層與狀態 ---
                 step_reward = -0.01 
+                obs_data = next_obs.observation # 【關鍵】先定義變數
                 
-                # 【核心修正】在獎勵判定前定義變數
-                obs_data = next_obs.observation
+                # 【搬移到這裡】現在 obs_data 已經存在，印出來才不會報錯
+                
+                
+                # ... 後續的獎勵與訓練邏輯 ...
+                next_s_unit = obs_data.feature_screen[features.SCREEN_FEATURES.unit_type.index]
+                next_s_relative = obs_data.feature_screen[features.SCREEN_FEATURES.player_relative.index]
+                next_m_unit = obs_data.feature_minimap[features.MINIMAP_FEATURES.unit_type.index]
+                next_m_relative = obs_data.feature_minimap[features.MINIMAP_FEATURES.player_relative.index]
+                
+                # 【修正】計算掠奪者數量 (原本代碼漏掉這段，會導致 NameError)
+                self_m_pixels = np.sum((next_s_unit == production_ai.MARAUDER_ID) & (next_s_relative == 1))
+                real_m_count = int(np.round(float(self_m_pixels) / 22.0))
+
+                # 偵測選取狀態
                 is_scv_selected = False
                 is_cc_selected = False
-                
-                # 取得最新一幀的特徵
-                next_s_unit = next_obs.observation.feature_screen[features.SCREEN_FEATURES.unit_type.index]
-                next_s_relative = next_obs.observation.feature_screen[features.SCREEN_FEATURES.player_relative.index]
-                next_m_unit = next_obs.observation.feature_minimap[features.MINIMAP_FEATURES.unit_type.index]
-                next_m_relative = next_obs.observation.feature_minimap[features.MINIMAP_FEATURES.player_relative.index]
-
-                # A. 【新增】補給站獎勵 (限前 2 個，使用全域小地圖判定)
-                curr_d_pixels = np.sum((next_m_unit == production_ai.SUPPLY_DEPOT_ID) & (next_m_relative == 1))
-                if curr_d_pixels > last_d_pixels:
-                    if rewarded_depots < 2:
-                        rewarded_depots += 1
-                        step_reward += 30.0 # 補給站權重提高至 30
-                        print(f"🏠 偵測到新補給站完工！累計: {rewarded_depots} | 獎勵 +30")
-                    last_d_pixels = curr_d_pixels
-
-                if is_scv_selected:
-                    step_reward += 0.5 
-                if is_cc_selected:
-                    step_reward += 0.5
-                
-                if 1 <= a_id <= 13 and not is_scv_selected:
-                    step_reward -= 0.1
-                # B. 【修正】回家獎勵 (每局限一次)
-                if a_id == 40 and not has_rewarded_home:
-                    cc_visible = np.any((next_s_unit == production_ai.COMMAND_CENTER_ID) & (next_s_relative == 1))
-                    if cc_visible:
-                        step_reward += 10.0 
-                        has_rewarded_home = True
-                        print(f"🏠 第一次找到基地！獎勵 +10")
-
-                # C. 【修正】Action 41 編隊獎勵 (改用 next_obs 判定結果)
-                if a_id == 41 and not has_rewarded_control_group:
-                    # 必須檢查動作執行「後」的結果
-                    is_cc_selected_now = False
-                    obs_data = next_obs.observation # 使用下一步的資料
-                    
                 if len(obs_data.single_select) > 0:
                     u_type = obs_data.single_select[0].unit_type
                     if u_type == production_ai.SCV_ID: is_scv_selected = True
                     if u_type == production_ai.COMMAND_CENTER_ID: is_cc_selected = True
                 elif len(obs_data.multi_select) > 0:
-                    if obs_data.multi_select[0].unit_type == production_ai.SCV_ID: is_scv_selected = True
-                    
-                    # 檢查控制組 1 是否已被正確設定
-                    control_groups = obs_data.control_groups
-                    if is_cc_selected_now and control_groups[1][0] == production_ai.COMMAND_CENTER_ID:
-                        step_reward += 15.0 
-                        has_rewarded_control_group = True
-                        print("⌨️ 成功將主堡編入隊伍 1！獎勵 +15")
+                    if any(u.unit_type == production_ai.SCV_ID for u in obs_data.multi_select):
+                        is_scv_selected = True
+
+                # --- 4. 獎勵邏輯：引導 AI 主動切換視角 ---
                 
-                # 螢幕判定兵營加分 (限每局一次)
-                if np.any((next_s_unit == production_ai.BARRACKS_ID) & (next_s_relative == 1)) and not has_rewarded_barracks:
-                    step_reward += 60.0
-                    has_rewarded_barracks = True
-                    print("🏗️ 螢幕偵測到兵營！獎勵 +60")
+                # A. 工兵選取引導 (限前 50 次)
+                # A. 工兵選取獎勵 (限前 50 次)
+                # --- 4. 獎勵邏輯優化 ---
+                # 如果正處於鎖定建築動作中 (hands.locked_action) 且 沒選中工兵
+                if hands.locked_action is not None:
+                    if not is_scv_selected:
+                        step_reward -= 0.5  # 輕微處罰，提醒它趕快選人
+                    else:
+                        step_reward += 1.0  # 鼓勵它保持選取狀態直到房子放下
 
-                # 螢幕判定科技實驗室加分
-                if np.any((next_s_unit == production_ai.BARRACKS_TECHLAB_ID) & (next_s_relative == 1)) and not has_rewarded_techlab:
-                    step_reward += 100.0
-                    has_rewarded_techlab = True
-                    print("🧪 螢幕偵測到實驗室！獎勵 +100")
+                if is_scv_selected:
+                    if scv_reward_count < 50:
+                        step_reward += 1.5
+                        scv_reward_count += 1
+                    else:
+                        step_reward += 0.01 
 
-                # 目標單位 (掠奪者) 產出加分
-                self_m_pixels = np.sum((next_s_unit == production_ai.MARAUDER_ID) & (next_s_relative == 1))
-                real_m_count = int(np.round(float(self_m_pixels) / 22.0))
+
+                # C. 補給站獎勵
+                curr_d_pixels = np.sum((next_m_unit == production_ai.SUPPLY_DEPOT_ID) & (next_m_relative == 1))
+                if curr_d_pixels > last_d_pixels:
+                    if rewarded_depots < 2:
+                        rewarded_depots += 1
+                        step_reward += 50.0 
+                        print(f"🏠 補給站完工！獎勵 +50")
+                    last_d_pixels = curr_d_pixels
+
+                # D. 回家獎勵 (當 AI 主動選擇 40 且看到基地時)
+                if actual_id == 40 and not has_rewarded_home:
+                    if np.any((next_s_unit == production_ai.COMMAND_CENTER_ID) & (next_s_relative == 1)):
+                        step_reward += 10.0 
+                        has_rewarded_home = True
+                        print(f"🏠 第一次主動切換視角找到基地！獎勵 +10")
+
+                # E. 掠奪者產出獎勵
                 if real_m_count > last_target_count:
                     step_reward += 200.0
-                    print(f"🎯 產出狩獵者！數量: {real_m_count}")
+                    print(f"🎯 產出掠奪者！數量: {real_m_count}")
                     last_target_count = real_m_count
 
+                # 【修正】刪除原本代碼中重複的 total_reward += step_reward
                 total_reward += step_reward
 
                 # --- 5. 狀態更新與存入記憶 ---
                 updated_block = getattr(hands, 'active_parameter', 1)
                 next_state = get_state_vector(next_obs, updated_block, CURRENT_TRAIN_TASK)
+                # 現在 real_m_count 已經定義，不會再報錯
                 done = bool(next_obs.last() or real_m_count >= 5 or next_obs.observation.game_loop[0] >= 20160)
-                
-                # 將經驗存入 deque 供後續 batch 訓練
-                memory.append((state, int(a_id), int(p_id), float(step_reward), next_state, bool(done)))
-                
+                # 確保存入記憶的是 ProductionAI 真正執行的那個動作 ID
+                # 如果這一步因為鎖定機制執行了 Action 1，即便隨機抽到 40，也要記為 1
+                actual_action_id = hands.locked_action if hands.locked_action is not None else a_id
+                memory.append((state, int(actual_action_id), int(p_id), float(step_reward), next_state, bool(done)))
+                obs = next_obs
                 # --- 6. 模型訓練 (批次學習) ---
-                if len(memory) > 1000:
+                # --- 6. 模型訓練 (批次學習) ---
+                train_step_counter += 1
+                if len(memory) > 1000 and train_step_counter % 8 == 0:
                     batch = random.sample(memory, 64)
-                    # (此處應執行 optimizer.step() 等 DQN 訓練邏輯，建議保留你原本的實作)
+                    
+                    # 準備批次數據
+                    states, actions_id, params_id, rewards, next_states, dones = zip(*batch)
+                    
+                    states_t = torch.FloatTensor(np.array(states))
+                    next_states_t = torch.FloatTensor(np.array(next_states))
+                    actions_t = torch.LongTensor(actions_id)
+                    params_t = torch.LongTensor(params_id) - 1 # 轉回 0-15 索引
+                    rewards_t = torch.FloatTensor(rewards)
+                    dones_t = torch.FloatTensor(dones)
 
+                    # 計算當前 Q 值
+                    current_q_actions, current_q_params = brain_model(states_t)
+                    q_a = current_q_actions.gather(1, actions_t.unsqueeze(1)).squeeze(1)
+                    q_p = current_q_params.gather(1, params_t.unsqueeze(1)).squeeze(1)
+
+                    # 計算目標 Q 值 (Double DQN 簡化版)
+                    with torch.no_grad():
+                        next_q_actions, next_q_params = brain_model(next_states_t)
+                        max_next_q_a = next_q_actions.max(1)[0]
+                        max_next_q_p = next_q_params.max(1)[0]
+                        target_a = rewards_t + (1 - dones_t) * gamma * max_next_q_a
+                        target_p = rewards_t + (1 - dones_t) * gamma * max_next_q_p
+
+                    # 算損失並更新
+                    loss = criterion(q_a, target_a) + criterion(q_p, target_p)
+                    optimizer.zero_grad()
+                    loss.backward()
+                    optimizer.step()
                 if done:
                     # 統計兵營與科技實驗室 (全域掃描)
                     final_b_pixels = np.sum((next_m_unit == production_ai.BARRACKS_ID) & (next_m_relative == 1))

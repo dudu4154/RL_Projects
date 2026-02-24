@@ -51,6 +51,12 @@ class DataCollector:
 # 🧠 生產大腦: 整合所有功能與修正
 # =========================================================
 class ProductionAI:
+    def _is_scv_selected(self, obs):
+        if len(obs.observation.single_select) > 0:
+            return obs.observation.single_select[0].unit_type == SCV_ID
+        if len(obs.observation.multi_select) > 0:
+            return any(u.unit_type == SCV_ID for u in obs.observation.multi_select)
+        return False
     # --- 新增安全獲取函式 ---
     def _get_safe_func(self, name):
         try:
@@ -67,6 +73,8 @@ class ProductionAI:
         self.gas_workers_assigned = 0
         self.active_parameter = 1 
         self.base_minimap_coords = None
+        self.locked_action = None
+        self.lock_timer = 0  # 【新增】鎖定計時器
 
     def _find_units_centers(self, unit_type, unit_id):
         """ 尋找畫面上所有指定 ID 的建築中心點，避免點擊到空地 """
@@ -85,197 +93,247 @@ class ProductionAI:
         return centers
 
     def get_action(self, obs, action_id, parameter=None):
-        # 1. 更新當前參數
-        if parameter is not None:
-            self.active_parameter = parameter
+        # --- A. 處理鎖定與超時 (確保連鎖不被中斷) ---
+        if self.locked_action is not None:
+            self.lock_timer += 1
+            if self.lock_timer > 60:
+                self.locked_action = None
+                self.lock_timer = 0
+            else:
+                action_id = self.locked_action
+        if parameter is not None: self.active_parameter = parameter
         
-        # 2. 獲取基本特徵層
         unit_type = obs.observation.feature_screen[features.SCREEN_FEATURES.unit_type.index]
         player = obs.observation.player
         available = obs.observation.available_actions
         
-        # 3. 定義基地座標 (修復 NameError)
-        cc_y, cc_x = (unit_type == COMMAND_CENTER_ID).nonzero()
-        if cc_x.any():
-            self.cc_x_screen, self.cc_y_screen = int(cc_x.mean()), int(cc_y.mean())
-
-        # 4. 計算建築網格座標 (84x84 螢幕)
+        # 定義建築網格
         b_id = self.active_parameter
+        # 將網格間距從 21 縮小或位移，避免點擊中心 (42, 42)
         row, col = (b_id - 1) // 4, (b_id - 1) % 4
-        jitter = random.randint(-8, 8)
-        grid_pos = (np.clip(int((col + 0.5) * 21) + jitter, 0, 83), 
-                    np.clip(int((row + 0.5) * 21) + jitter, 0, 83))
+        # 修正：讓 x 和 y 避開中央區域 (25~60 像素區間)
+        tx = (col * 20) + 12
+        ty = (row * 20) + 12
+        if 25 < tx < 60: tx = 15 if tx < 42 else 70 # 強制推離中心
+        if 25 < ty < 60: ty = 15 if ty < 42 else 70
+        grid_pos = (np.clip(tx, 0, 83), np.clip(ty, 0, 83))
 
-        # 5. 初始基地位置偵測 (僅用於統計，不觸發視角移動)
-        if self.base_minimap_coords is None:
-            m_relative = obs.observation.feature_minimap[features.MINIMAP_FEATURES.player_relative.index]
-            my_y, my_x = (m_relative == 1).nonzero()
-            if my_x.any():
-                bx, by = int(my_x.mean()), int(my_y.mean())
-                self.base_minimap_coords = (bx, by)
-                global BASE_LOCATION_CODE
-                BASE_LOCATION_CODE = 1 if (bx > 32 and by > 32) else 0
-
-        # 6. 統計數據紀錄
-        m_unit = obs.observation.feature_minimap[features.MINIMAP_FEATURES.unit_type.index]
-        m_rel = obs.observation.feature_minimap[features.MINIMAP_FEATURES.player_relative.index]
-        barracks_count = np.sum((m_unit == BARRACKS_ID) & (m_rel == 1))
-        
-        self.collector.log_step(obs.observation.game_loop, player.minerals, 
-                                player.vespene, player.food_workers, 
-                                16 + (int(np.sum(unit_type == REFINERY_ID)/80)*3), 
-                                barracks_count, action_id)
-
-        '''# [Action 1] 訓練 SCV (飽和度檢查)
+       
+        # [Action 1] 建造補給站 (100 M)
         if action_id == 1:
-            if current_workers < ideal_workers and player.minerals >= 50:
-                if actions.FUNCTIONS.Train_SCV_quick.id in available:
-                    return actions.FUNCTIONS.Train_SCV_quick("now")
-            return self._select_unit(unit_type, COMMAND_CENTER_ID)
-
-        # [Action 2] 建造補給站
-        elif action_id == 2:
-            if player.minerals >= 100 and actions.FUNCTIONS.Build_SupplyDepot_screen.id in available:
+            if player.minerals < 100:
+                self.locked_action = None
+                return actions.FUNCTIONS.no_op()
+            if actions.FUNCTIONS.Build_SupplyDepot_screen.id in available:
+                self.locked_action = None 
+                self.lock_timer = 0
                 return actions.FUNCTIONS.Build_SupplyDepot_screen("now", grid_pos)
+            self.locked_action = 1 # 【關鍵】沒蓋成前，鎖死這個動作
             return self._select_scv(unit_type, available)
-
-        # [Action 3] 建造瓦斯廠 (精確中心鎖定)
-        elif action_id == 3:
-            if player.minerals >= 75 and actions.FUNCTIONS.Build_Refinery_screen.id in available:
-                self.refinery_target = self._find_geyser(unit_type)
-                if self.refinery_target:
-                    return actions.FUNCTIONS.Build_Refinery_screen("now", self.refinery_target)
-            return self._select_scv(unit_type, available)
-
-        # [Action 4] 指派採瓦斯 (上限 3 人/廠)
-        elif action_id == 4:
-            max_gas_allowed = refinery_count * 3
-            if self.gas_workers_assigned < max_gas_allowed and self.refinery_target:
-                if actions.FUNCTIONS.Harvest_Gather_screen.id in available:
-                    self.gas_workers_assigned += 1
-                    return actions.FUNCTIONS.Harvest_Gather_screen("now", self.refinery_target)
-                return self._select_scv_filtered(unit_type, self.refinery_target)
-            return actions.FUNCTIONS.no_op()
-
-        # [Action 5] 建造兵營 (自動位移邏輯)
-        elif action_id == 5:
-            if player.minerals >= 150 and actions.FUNCTIONS.Build_Barracks_screen.id in available:
-                return actions.FUNCTIONS.Build_Barracks_screen("now", grid_pos)
-            return self._select_scv(unit_type, available)
-        
-        # [Action 6] 研發科技實驗室 (造掠奪者必備)
-        elif action_id == 6:
-            if player.minerals >= 50 and player.vespene >= 25:
-                if actions.FUNCTIONS.Build_TechLab_quick.id in available:
-                    return actions.FUNCTIONS.Build_TechLab_quick("now")
-            return self._select_unit(unit_type, BARRACKS_ID)
-
-        # [Action 7] 訓練掠奪者
-        elif action_id == 7:
-            barracks_list = self._find_units_centers(unit_type, BARRACKS_ID)
-            if barracks_list:
-                if actions.FUNCTIONS.Train_Marauder_quick.id in available:
-                    return actions.FUNCTIONS.Train_Marauder_quick("now")
-                # 點擊畫面上的第一個兵營
-                return actions.FUNCTIONS.select_point("select", barracks_list[0])
-            return actions.FUNCTIONS.no_op()
-
-        # [Action 8] 中心擴散掃描 (偵察周邊)
-        elif action_id == 8:
-            target = self.scan_points[self.current_scan_idx]
-            self.current_scan_idx = (self.current_scan_idx + 1) % len(self.scan_points)
-            return actions.FUNCTIONS.move_camera(target)
-
-        # [Action 9] 在視角選定網格建造二礦 (取代原先寫死的 42, 42)
-        elif action_id == 9:
-            if player.minerals >= 400 and actions.FUNCTIONS.Build_CommandCenter_screen.id in available:
-                return actions.FUNCTIONS.Build_CommandCenter_screen("now", grid_pos)
-            return self._select_scv(unit_type, available)'''
-        # [Action 1.]建造補給站
-        if action_id == 1:
-            if player.minerals >= 100 and actions.FUNCTIONS.Build_SupplyDepot_screen.id in available:
-                return actions.FUNCTIONS.Build_SupplyDepot_screen("now", grid_pos)
-            return self._select_scv(unit_type, available)
-        
+         
+        # [Action 2] 建造兵營 (150 M)
         elif action_id == 2:
-            if player.minerals >= 150 and actions.FUNCTIONS.Build_Barracks_screen.id in available:
+            if player.minerals < 150:
+                self.locked_action = None
+                return actions.FUNCTIONS.no_op()
+            
+            if actions.FUNCTIONS.Build_Barracks_screen.id in available:
+                self.locked_action = None 
+                self.lock_timer = 0
                 return actions.FUNCTIONS.Build_Barracks_screen("now", grid_pos)
+            if self._is_scv_selected(obs):
+                self.locked_action = None
+                self.lock_timer = 0
+                return actions.FUNCTIONS.no_op()
+
+            self.locked_action = 2
             return self._select_scv(unit_type, available)
         
         elif action_id == 3:
-            if player.minerals >= 150 and player.vespene >= 100 and actions.FUNCTIONS.Build_Factory_screen.id in available:
+            if player.minerals < 150 or player.vespene < 100:
+                self.locked_action = None
+                return actions.FUNCTIONS.no_op()
+            if actions.FUNCTIONS.Build_Factory_screen.id in available:
+                self.locked_action = None 
+                self.lock_timer = 0
                 return actions.FUNCTIONS.Build_Factory_screen("now", grid_pos)
+            if self._is_scv_selected(obs):
+                self.locked_action = None
+                self.lock_timer = 0
+                return actions.FUNCTIONS.no_op()
+            self.locked_action = 3 # 【關鍵】
             return self._select_scv(unit_type, available)
 
         # [Action 4] 建造星際港 (150 M, 100 V)
         elif action_id == 4:
-            if player.minerals >= 150 and player.vespene >= 100 and actions.FUNCTIONS.Build_Starport_screen.id in available:
+            if player.minerals < 150 or player.vespene < 100 :
+                self.locked_action = None
+                return actions.FUNCTIONS.no_op()
+            if actions.FUNCTIONS.Build_Starport_screen.id in available:
+                self.locked_action = None 
+                self.lock_timer = 0
                 return actions.FUNCTIONS.Build_Starport_screen("now", grid_pos)
+            if self._is_scv_selected(obs):
+                self.locked_action = None
+                self.lock_timer = 0
+                return actions.FUNCTIONS.no_op()
+            self.locked_action = 4 # 【關鍵】
             return self._select_scv(unit_type, available)
 
         # [Action 5] 建造核融合核心 (150 M, 150 V)
         elif action_id == 5:
-            if player.minerals >= 150 and player.vespene >= 150 and actions.FUNCTIONS.Build_FusionCore_screen.id in available:
+            if player.minerals < 150 or player.vespene < 150 :
+                self.locked_action = None
+                return actions.FUNCTIONS.no_op()
+            if actions.FUNCTIONS.Build_FusionCore_screen.id in available:
+                self.locked_action = None 
+                self.lock_timer = 0
                 return actions.FUNCTIONS.Build_FusionCore_screen("now", grid_pos)
+            if self._is_scv_selected(obs):
+                self.locked_action = None
+                self.lock_timer = 0
+                return actions.FUNCTIONS.no_op()
+            self.locked_action = 5
             return self._select_scv(unit_type, available)
 
         # [Action 6] 建造指揮中心 (400 M)
         elif action_id == 6:
-            if player.minerals >= 400 and actions.FUNCTIONS.Build_CommandCenter_screen.id in available:
+            if player.minerals < 400 :
+                self.locked_action = None
+                return actions.FUNCTIONS.no_op()
+            if actions.FUNCTIONS.Build_CommandCenter_screen.id in available:
+                self.locked_action = None 
+                self.lock_timer = 0
                 return actions.FUNCTIONS.Build_CommandCenter_screen("now", grid_pos)
+            if self._is_scv_selected(obs):
+                self.locked_action = None
+                self.lock_timer = 0
+                return actions.FUNCTIONS.no_op()
+            self.locked_action = 6
             return self._select_scv(unit_type, available)
 
         # [Action 7] 建造電機工程所 (125 M)
         elif action_id == 7:
-            if player.minerals >= 125 and actions.FUNCTIONS.Build_EngineeringBay_screen.id in available:
+            if player.minerals < 125 :
+                self.locked_action = None
+                return actions.FUNCTIONS.no_op()
+            if actions.FUNCTIONS.Build_EngineeringBay_screen.id in available:
+                self.locked_action = None 
+                self.lock_timer = 0
                 return actions.FUNCTIONS.Build_EngineeringBay_screen("now", grid_pos)
+            if self._is_scv_selected(obs):
+                self.locked_action = None
+                self.lock_timer = 0
+                return actions.FUNCTIONS.no_op()
+            self.locked_action = 7
             return self._select_scv(unit_type, available)
 
         # [Action 8] 建造感應塔 (125 M, 50 V)
         elif action_id == 8:
-            if player.minerals >= 125 and player.vespene >= 50 and actions.FUNCTIONS.Build_SensorTower_screen.id in available:
+            if player.minerals < 125 or player.vespene < 50 :
+                self.locked_action = None
+                return actions.FUNCTIONS.no_op()
+            if actions.FUNCTIONS.Build_SensorTower_screen.id in available:
+                self.locked_action = None 
+                self.lock_timer = 0
                 return actions.FUNCTIONS.Build_SensorTower_screen("now", grid_pos)
+            if self._is_scv_selected(obs):
+                self.locked_action = None
+                self.lock_timer = 0
+                return actions.FUNCTIONS.no_op()
+            self.locked_action = 8
             return self._select_scv(unit_type, available)
 
         # [Action 9] 建造幽靈特務學院 (150 M, 50 V)
         elif action_id == 9:
-            if player.minerals >= 150 and player.vespene >= 50 and actions.FUNCTIONS.Build_GhostAcademy_screen.id in available:
+            if player.minerals < 150 or player.vespene < 50:
+                self.locked_action = None
+                return actions.FUNCTIONS.no_op()
+            if actions.FUNCTIONS.Build_GhostAcademy_screen.id in available:
+                self.locked_action = None 
+                self.lock_timer = 0
                 return actions.FUNCTIONS.Build_GhostAcademy_screen("now", grid_pos)
+            if self._is_scv_selected(obs):
+                self.locked_action = None
+                self.lock_timer = 0
+                return actions.FUNCTIONS.no_op()
+            self.locked_action = 9
             return self._select_scv(unit_type, available)
 
         # [Action 10] 建造兵工廠 (150 M, 100 V)
         elif action_id == 10:
-            if player.minerals >= 150 and player.vespene >= 100 and actions.FUNCTIONS.Build_Armory_screen.id in available:
+            if player.minerals < 150 or player.vespene < 100:
+                self.locked_action = None
+                return actions.FUNCTIONS.no_op()
+            if actions.FUNCTIONS.Build_Armory_screen.id in available:
+                self.locked_action = None 
+                self.lock_timer = 0
                 return actions.FUNCTIONS.Build_Armory_screen("now", grid_pos)
+            if self._is_scv_selected(obs):
+                self.locked_action = None
+                self.lock_timer = 0
+                return actions.FUNCTIONS.no_op()
+            self.locked_action = 10
             return self._select_scv(unit_type, available)
         
         # [Action 11] 建造瓦斯廠
         elif action_id == 11:
-            if player.minerals >= 75 and actions.FUNCTIONS.Build_Refinery_screen.id in available:
+            if player.minerals < 75:
+                self.locked_action = None
+                return actions.FUNCTIONS.no_op()
+            if actions.FUNCTIONS.Build_Refinery_screen.id in available:
+                self.locked_action = None 
+                self.lock_timer = 0
                 self.refinery_target = self._find_geyser(unit_type)
                 if self.refinery_target:
                     # 這裡會回傳湧泉的中心座標 (x, y)
                     return actions.FUNCTIONS.Build_Refinery_screen("now", self.refinery_target)
+            self.locked_action = 11
             return self._select_scv(unit_type, available)
         
         # [Action 12] 建造飛彈砲台 (100 M)
         elif action_id == 12:
-            if player.minerals >= 100 and actions.FUNCTIONS.Build_MissileTurret_screen.id in available:
+            if player.minerals < 100:
+                self.locked_action = None
+                return actions.FUNCTIONS.no_op()
+            if actions.FUNCTIONS.Build_MissileTurret_screen.id in available:
+                self.locked_action = None 
+                self.lock_timer = 0
                 return actions.FUNCTIONS.Build_MissileTurret_screen("now", grid_pos)
+            if self._is_scv_selected(obs):
+                self.locked_action = None
+                self.lock_timer = 0
+                return actions.FUNCTIONS.no_op()
+            self.locked_action = 12
             return self._select_scv(unit_type, available)
 
         # [Action 13] 建造碉堡 (100 M)
         elif action_id == 13:
-            if player.minerals >= 100 and actions.FUNCTIONS.Build_Bunker_screen.id in available:
+            if player.minerals < 100:
+                self.locked_action = None
+                return actions.FUNCTIONS.no_op()
+            if actions.FUNCTIONS.Build_Bunker_screen.id in available:
+                self.locked_action = None 
+                self.lock_timer = 0
                 return actions.FUNCTIONS.Build_Bunker_screen("now", grid_pos)
+            if self._is_scv_selected(obs):
+                self.locked_action = None
+                self.lock_timer = 0
+                return actions.FUNCTIONS.no_op()
+            self.locked_action = 13
             return self._select_scv(unit_type, available)
         
         # --- [Action 14-32] 單位生產指令集 ---
 
-        # [Action 14] 製造太空工程車 (SCV) - 50 M
+        # [Action 14] 製造 SCV (注意：此行現在應該在刪除死碼後的第 150 行左右)
         elif action_id == 14:
-            if player.minerals >= 50 and actions.FUNCTIONS.Train_SCV_quick.id in available:
+            if player.minerals >= 200 and actions.FUNCTIONS.Train_SCV_quick.id in available:
                 return actions.FUNCTIONS.Train_SCV_quick("now")
+            
+            # 【關鍵】如果正在鎖定蓋房子，不要去點主堡，否則工兵選取會消失
+            if self.locked_action is not None:
+                return actions.FUNCTIONS.no_op()
+                
             return self._select_unit(unit_type, COMMAND_CENTER_ID)
 
         # [Action 15] 製造礦騾 (MULE) - 修正後的魯棒寫法
@@ -308,16 +366,14 @@ class ProductionAI:
                 return actions.FUNCTIONS.Train_Reaper_quick("now")
             return self._select_unit(unit_type, BARRACKS_ID)
 
-        # [Action 18] 製造掠奪者 (修正版)
+        
+        # [Action 18] 製造掠奪者
         elif action_id == 18:
             if actions.FUNCTIONS.Train_Marauder_quick.id in available:
                 return actions.FUNCTIONS.Train_Marauder_quick("now")
             
-            # 不要用 _select_unit，改用 centers 確保點在建築物上
-            centers = self._find_units_centers(unit_type, BARRACKS_ID)
-            if centers:
-                return actions.FUNCTIONS.select_point("select", random.choice(centers))
-            return actions.FUNCTIONS.no_op()
+            # 如果還沒選中兵營，優先嘗試選取
+            return self._select_unit(unit_type, BARRACKS_ID)
         
         # [Action 19] 製造幽靈特務 (Ghost) - 150 M, 125 V
         elif action_id == 19:
@@ -490,13 +546,29 @@ class ProductionAI:
             return self._select_unit(unit_type, GHOST_ACADEMY_ID)
         
         # [Action 40]移動視角
+        # [Action 40] 智慧移動視角 (整合編隊跳轉邏輯)
         elif action_id == 40:
-                    block_id = self.active_parameter
-                    r, c = (block_id - 1) // 4, (block_id - 1) % 4
-                    target_pos = (np.clip(int((c + 0.5) * 16), 0, 63), 
-                                np.clip(int((r + 0.5) * 16), 0, 63))
-                    return actions.FUNCTIONS.move_camera(target_pos)
+            block_id = self.active_parameter
+            
+            # A. 判斷目標網格是否為基地位置 (0=左上 1, 1=右下 16)
+            is_base_grid = (block_id == 1 and BASE_LOCATION_CODE == 0) or \
+                           (block_id == 16 and BASE_LOCATION_CODE == 1)
+            
+            # B. 檢查編隊 1 是否已經設定為主堡
+            control_groups = obs.observation.control_groups
+            has_cc_in_group1 = (control_groups[1][0] == COMMAND_CENTER_ID)
 
+            # C. 智慧判定：能用編隊跳轉就用，不能就用相機移動
+            if is_base_grid and has_cc_in_group1 and (actions.FUNCTIONS.select_control_group.id in available):
+                # print(f"🚀 透過編隊 1 快捷鍵跳轉回基地 (網格 {block_id})")
+                return actions.FUNCTIONS.select_control_group("recall", 1)
+
+            # D. 標準網格移動
+            r, c = (block_id - 1) // 4, (block_id - 1) % 4
+            target_pos = (np.clip(int((c + 0.5) * 16), 0, 63), 
+                          np.clip(int((r + 0.5) * 16), 0, 63))
+            return actions.FUNCTIONS.move_camera(target_pos)
+        
         # [Action 41] 將當前選中單位設為編隊 1 (Ctrl + 1)
         # [Action 41] 真正的人族技巧：將主堡編為編隊 1
         elif action_id == 41:
@@ -539,26 +611,30 @@ class ProductionAI:
         return actions.FUNCTIONS.no_op()
 
     # --- 修改後的選取工兵邏輯 ---
+
     def _select_scv(self, unit_type, available):
+        # 1. 優先選取閒置工兵 (最穩定)
         if actions.FUNCTIONS.select_idle_worker.id in available:
             return actions.FUNCTIONS.select_idle_worker("select")
+        
+        # 2. 如果螢幕上有看到工兵，隨機點一個
+        # 將 select_all_type 改為單點選取，確保建築面板會出現
         y, x = (unit_type == SCV_ID).nonzero()
         if x.any():
             idx = random.randint(0, len(x) - 1)
+            # 使用 "select" 參數選取單一工兵
             return actions.FUNCTIONS.select_point("select", (x[idx], y[idx]))
-        return actions.FUNCTIONS.no_op() # 如果視角不對，這裡會一直回傳 no_op
+            
+        # 3. 【修正】如果都沒看到，去點擊礦堆 (Mineral Field) 周邊
+        # 礦堆一定在基地旁邊，那裡一定有工兵在採礦
+        y_m, x_m = (unit_type == MINERAL_FIELD_ID).nonzero()
+        if x_m.any():
+            # 隨機點擊礦區的一個點，極高機率選中正在採礦的工兵
+            idx = random.randint(0, len(x_m) - 1)
+            return actions.FUNCTIONS.select_point("select", (x_m[idx], y_m[idx]))
 
-    def _select_scv_filtered(self, unit_type, target, available): # 這裡要加 available
-        """ 選取遠離目標資源點的工兵，避免拉走正在採氣的人 """
-        y, x = (unit_type == SCV_ID).nonzero()
-        if x.any() and target:
-            dist = np.sqrt((x - target[0])**2 + (y - target[1])**2)
-            mask = dist > 15 
-            if mask.any():
-                idx = random.choice(np.where(mask)[0])
-                return actions.FUNCTIONS.select_point("select", (x[idx], y[idx]))
-        return self._select_scv(unit_type, available) # 這裡原本沒傳參數會報錯
-
+        return actions.FUNCTIONS.no_op()
+    
     def _calc_depot_pos(self):
         """ 三角形排列座標計算 """
         if self.depots_built == 0:
@@ -621,7 +697,7 @@ def main(argv):
     del argv
     agent = ProductionAI()
     with sc2_env.SC2Env(
-        map_name="Simple64",
+        map_name="Simple96",
         players=[sc2_env.Agent(sc2_env.Race.terran), sc2_env.Agent(sc2_env.Race.terran)],
         agent_interface_format=sc2_env.AgentInterfaceFormat(
             feature_dimensions=sc2_env.Dimensions(screen=84, minimap=64),
@@ -633,7 +709,7 @@ def main(argv):
             print("--- 啟動新對局 ---")
             obs_list = env.reset()
             while True:
-                action_id = random.choice([41,42])#random.randint(1, 40)##
+                action_id = random.randint(1, 40)##random.choice([41,42])#
                 param = random.randint(1, 16)#1# # 網格限制 1-16
                 
                 sc2_action = agent.get_action(obs_list[0], action_id, parameter=param)
