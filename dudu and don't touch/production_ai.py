@@ -124,11 +124,21 @@ class ProductionAI:
             if player.minerals < 100:
                 self.locked_action = None
                 return actions.FUNCTIONS.no_op()
+            
+            # A. 按鈕出現，直接蓋下去
             if actions.FUNCTIONS.Build_SupplyDepot_screen.id in available:
                 self.locked_action = None 
                 self.lock_timer = 0
                 return actions.FUNCTIONS.Build_SupplyDepot_screen("now", grid_pos)
-            self.locked_action = 1 # 【關鍵】沒蓋成前，鎖死這個動作
+
+            # B. 【修正點】如果已經選中工兵，就不要再重複執行 _select_scv
+            # 這樣可以讓遊戲引擎有時間把建築選單顯示出來
+            if self._is_scv_selected(obs):
+                self.locked_action = 1
+                return actions.FUNCTIONS.no_op() # 靜止等待按鈕加載
+
+            # C. 還沒選到人
+            self.locked_action = 1 
             return self._select_scv(unit_type, available)
          
         # [Action 2] 建造兵營 (150 M)
@@ -569,37 +579,28 @@ class ProductionAI:
                           np.clip(int((r + 0.5) * 16), 0, 63))
             return actions.FUNCTIONS.move_camera(target_pos)
         
-        # [Action 41] 將當前選中單位設為編隊 1 (Ctrl + 1)
-        # [Action 41] 真正的人族技巧：將主堡編為編隊 1
+        # [Action 43] 經濟重啟 (抓回所有閒置工兵去採礦)
+        # [Action 41] 經濟重啟 (優化版：支援自動回家)
         elif action_id == 41:
-            # 1. 檢查當前選中單位是否為主堡 (ID 18)
-            is_cc_selected = False
+            if self._is_scv_selected(obs):
+                y_m, x_m = (unit_type == MINERAL_FIELD_ID).nonzero()
+                if x_m.any():
+                    # 情況 A：畫面上看得到礦區，直接命令採礦並解鎖
+                    target = (int(x_m.mean()), int(y_m.mean()))
+                    self.locked_action = None
+                    self.lock_timer = 0
+                    return actions.FUNCTIONS.Smart_screen("now", target)
+                else:
+                    # 情況 B：選中人但畫面沒礦區，【修正】強制跳轉回基地，且不解除鎖定
+                    # 網格 1 通常是基地位置
+                    return actions.FUNCTIONS.move_camera((16, 16)) 
             
-            # 檢查單選清單
-            if len(obs.observation.single_select) > 0:
-                if obs.observation.single_select[0].unit_type == COMMAND_CENTER_ID:
-                    is_cc_selected = True
-            # 檢查多選清單 (以防萬一選到多個單位)
-            elif len(obs.observation.multi_select) > 0:
-                if obs.observation.multi_select[0].unit_type == COMMAND_CENTER_ID:
-                    is_cc_selected = True
-
-            # 2. 邏輯判斷：已選中就編隊，未選中就去選
-            if is_cc_selected:
-                if actions.FUNCTIONS.select_control_group.id in available:
-                    # print("⌨️ 成功執行 Ctrl + 1 (設定編隊 1)")
-                    return actions.FUNCTIONS.select_control_group("set", 1)
-            else:
-                # 若沒選中，執行選取主堡動作
-                # 注意：這需要視角看著主堡才能成功
-                return self._select_unit(unit_type, COMMAND_CENTER_ID)
-        # [Action 42] 選取編隊 1 並跳轉視角到該處
-        elif action_id == 42:
-            if actions.FUNCTIONS.select_control_group.id in available:
-                # "recall" 會選取該編隊，若搭配正確參數甚至能直接跳轉視角
-                return actions.FUNCTIONS.select_control_group("recall", 1)
+            if actions.FUNCTIONS.select_idle_worker.id in available:
+                self.locked_action = 41 
+                return actions.FUNCTIONS.select_idle_worker("select_all")
+            
             return actions.FUNCTIONS.no_op()
-        return actions.FUNCTIONS.no_op()
+        
 
     # --- 內部輔助函式 ---
     def _select_unit(self, unit_type, unit_id):
@@ -709,7 +710,7 @@ def main(argv):
             print("--- 啟動新對局 ---")
             obs_list = env.reset()
             while True:
-                action_id = random.randint(1, 40)##random.choice([41,42])#
+                action_id = random.randint(1, 41)##random.choice([41,42])#
                 param = random.randint(1, 16)#1# # 網格限制 1-16
                 
                 sc2_action = agent.get_action(obs_list[0], action_id, parameter=param)

@@ -152,7 +152,7 @@ def main(argv):
     epsilon = 1.0; epsilon_decay = 0.999; gamma = 0.99 
 
     with sc2_env.SC2Env(
-        map_name="Simple64",
+        map_name="Simple96",
         players=[sc2_env.Agent(sc2_env.Race.terran), sc2_env.Agent(sc2_env.Race.terran)],
         agent_interface_format=sc2_env.AgentInterfaceFormat(
             feature_dimensions=sc2_env.Dimensions(screen=84, minimap=64), use_raw_units=False),
@@ -185,7 +185,7 @@ def main(argv):
 
                 # Epsilon-Greedy 選擇 (a_id 決定做什麼，p_id 決定在哪做)
                 if random.random() <= epsilon:
-                    a_id = random.randint(1, 42) 
+                    a_id = random.randint(1, 41) 
                     p_id = random.randint(1, 16)
                 else:
                     with torch.no_grad():
@@ -199,22 +199,34 @@ def main(argv):
                 # --- 2. 執行單一動作 ---
                 sc2_action = hands.get_action(obs, a_id, parameter=p_id)
                 actual_id = hands.locked_action if hands.locked_action is not None else a_id
+                
+                # --- 2. 執行動作與取得新觀察 ---
                 obs_list = env.step([sc2_action, actions.FUNCTIONS.no_op()])
                 next_obs = obs_list[0]
                 
-                # --- 3. 提取特徵層與狀態 ---
-                step_reward = -0.01 
-                obs_data = next_obs.observation # 【關鍵】先定義變數
-                
-                # 【搬移到這裡】現在 obs_data 已經存在，印出來才不會報錯
-                
-                
-                # ... 後續的獎勵與訓練邏輯 ...
-                next_s_unit = obs_data.feature_screen[features.SCREEN_FEATURES.unit_type.index]
-                next_s_relative = obs_data.feature_screen[features.SCREEN_FEATURES.player_relative.index]
+                # --- 【關鍵修正：變數定義必須移到最前面】 ---
+                obs_data = next_obs.observation 
                 next_m_unit = obs_data.feature_minimap[features.MINIMAP_FEATURES.unit_type.index]
                 next_m_relative = obs_data.feature_minimap[features.MINIMAP_FEATURES.player_relative.index]
+                next_s_unit = obs_data.feature_screen[features.SCREEN_FEATURES.unit_type.index]
+                next_s_relative = obs_data.feature_screen[features.SCREEN_FEATURES.player_relative.index]
+
+                # --- 3. 數據計算與紀錄 (現在變數已定義，不會報錯了) ---
+                curr_b_count = np.sum((next_m_unit == production_ai.BARRACKS_ID) & (next_m_relative == 1))
                 
+                # 呼叫紀錄器將每一步寫入 terran_log
+                hands.collector.log_step(
+                    obs_data.game_loop,        # Time
+                    obs_data.player.minerals, 
+                    obs_data.player.vespene,
+                    obs_data.player.food_workers, 
+                    16, curr_b_count, actual_id
+                )
+
+                # --- 4. 獎勵判定與印出資訊 ---
+                step_reward = -0.01 
+                if train_step_counter % 10 == 0:
+                    print(f"Episode {ep+1} | 執行動作: {a_id} | 參數: {p_id} | 礦石: {obs_data.player.minerals}")
                 # 【修正】計算掠奪者數量 (原本代碼漏掉這段，會導致 NameError)
                 self_m_pixels = np.sum((next_s_unit == production_ai.MARAUDER_ID) & (next_s_relative == 1))
                 real_m_count = int(np.round(float(self_m_pixels) / 22.0))
@@ -236,40 +248,18 @@ def main(argv):
                 # A. 工兵選取獎勵 (限前 50 次)
                 # --- 4. 獎勵邏輯優化 ---
                 # 如果正處於鎖定建築動作中 (hands.locked_action) 且 沒選中工兵
-                if hands.locked_action is not None:
-                    if not is_scv_selected:
-                        step_reward -= 0.5  # 輕微處罰，提醒它趕快選人
-                    else:
-                        step_reward += 1.0  # 鼓勵它保持選取狀態直到房子放下
-
-                if is_scv_selected:
-                    if scv_reward_count < 50:
-                        step_reward += 1.5
-                        scv_reward_count += 1
-                    else:
-                        step_reward += 0.01 
-
-
-                # C. 補給站獎勵
-                curr_d_pixels = np.sum((next_m_unit == production_ai.SUPPLY_DEPOT_ID) & (next_m_relative == 1))
-                if curr_d_pixels > last_d_pixels:
-                    if rewarded_depots < 2:
-                        rewarded_depots += 1
-                        step_reward += 50.0 
-                        print(f"🏠 補給站完工！獎勵 +50")
-                    last_d_pixels = curr_d_pixels
-
-                # D. 回家獎勵 (當 AI 主動選擇 40 且看到基地時)
-                if actual_id == 40 and not has_rewarded_home:
-                    if np.any((next_s_unit == production_ai.COMMAND_CENTER_ID) & (next_s_relative == 1)):
-                        step_reward += 10.0 
-                        has_rewarded_home = True
-                        print(f"🏠 第一次主動切換視角找到基地！獎勵 +10")
-
-                # E. 掠奪者產出獎勵
+                # E. 掠奪者產出的「階梯式」獎勵
+                # --- 掠奪者產出獎勵：簡單清晰的給分 ---
                 if real_m_count > last_target_count:
-                    step_reward += 200.0
-                    print(f"🎯 產出掠奪者！數量: {real_m_count}")
+                    new_units = real_m_count - last_target_count
+                    # 每產出一隻就給 300 分，這能讓 AI 明白產兵比跳視角重要 30 倍
+                    step_reward += (new_units * 300.0)
+                    print(f"🎯 成功產出 {new_units} 隻掠奪者！累積獎勵 +{new_units * 300.0}")
+                    
+                    # 達成 5 隻就給一個超大終結獎金
+                    if real_m_count >= 5:
+                        step_reward += 1000.0
+                    
                     last_target_count = real_m_count
 
                 # 【修正】刪除原本代碼中重複的 total_reward += step_reward
