@@ -1,0 +1,6 @@
+Episode,Epsilon,Total_Reward,Barracks,TechLabs,Marauders,End_Loop,Reason,Is_Bottom_Right
+1,1.000,-12,0,0,0,20160,Done,False
+2,0.999,-12,0,0,0,20160,Done,False
+3,0.998,-12,0,0,0,20160,Done,False
+4,0.997,-12,0,0,0,20160,Done,False
+5,0.996,-12,0,0,0,20160,Done,False
