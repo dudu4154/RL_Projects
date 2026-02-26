@@ -144,6 +144,8 @@ def main(argv):
     logger = TrainingLogger()
     learn_min = 0.01 # 這是你的 epsilon 最小值
     
+    if not os.path.exists(log_dir):
+        os.makedirs(log_dir, exist_ok=True) # 確保資料夾一定存在
     model_path = os.path.join(log_dir, "dqn_model.pth")
     if os.path.exists(model_path):
         brain_model.load_state_dict(torch.load(model_path))
@@ -163,7 +165,12 @@ def main(argv):
             hands = ProductionAI() 
             obs_list = env.reset() 
             obs = obs_list[0]  # 【關鍵】確保進入 while 之前 obs 已被定義
-            
+            # --- 每個回合開始時重置一次性獎勵旗標 ---
+            has_rewarded_depot = False
+            has_rewarded_barracks = False
+            has_rewarded_refinery = False
+            has_rewarded_techlab = False
+            has_rewarded_first_marauder = False
             # 初始化追蹤變數
             last_target_count = 0 
             rewarded_depots = 0     # 【新增】紀錄已給分過的補給站數量
@@ -243,24 +250,42 @@ def main(argv):
                         is_scv_selected = True
 
                 # --- 4. 獎勵邏輯：引導 AI 主動切換視角 ---
-                
-                # A. 工兵選取引導 (限前 50 次)
-                # A. 工兵選取獎勵 (限前 50 次)
-                # --- 4. 獎勵邏輯優化 ---
-                # 如果正處於鎖定建築動作中 (hands.locked_action) 且 沒選中工兵
-                # E. 掠奪者產出的「階梯式」獎勵
-                # --- 掠奪者產出獎勵：簡單清晰的給分 ---
-                if real_m_count > last_target_count:
-                    new_units = real_m_count - last_target_count
-                    # 每產出一隻就給 300 分，這能讓 AI 明白產兵比跳視角重要 30 倍
-                    step_reward += (new_units * 300.0)
-                    print(f"🎯 成功產出 {new_units} 隻掠奪者！累積獎勵 +{new_units * 300.0}")
+               # --- [正向里程碑獎勵系統] (在 train_dqn_on_top.py 的獎勵區塊) ---
+                step_reward = 0.0
+
+                # 1. 偵測補給站 (一次性里程碑)
+                # 透過小地圖偵測補給站像素
+                curr_d_pixels = np.sum((next_m_unit == production_ai.SUPPLY_DEPOT_ID) & (next_m_relative == 1))
+                if curr_d_pixels > 0 and not has_rewarded_depot:
+                    step_reward += 50.0  # 給予 50 分獎勵
+                    has_rewarded_depot = True
+                    print("🏠 首座補給站完工！開啟科技樹獎勵 +50")
+
+                # 2. 偵測兵營 (一次性)
+                if curr_b_count > 0 and not has_rewarded_barracks:
+                    step_reward += 100.0
+                    has_rewarded_barracks = True
+                    print("🏭 首座兵營完工！獎勵 +100")
+
+                # ... 後續科技實驗室與掠奪者獎勵 ...
+
+                # 2. 科技實驗室里程碑 (產兵核心)
+                curr_t_pixels = np.sum((next_m_unit == production_ai.BARRACKS_TECHLAB_ID) & (next_m_relative == 1))
+                if curr_t_pixels > 0 and not has_rewarded_techlab:
+                    step_reward += 200.0 # 提高分量，引導 AI 突破瓶頸
+                    has_rewarded_techlab = True
+                    print("🧪 [里程碑] 科技實驗室完工，解鎖掠奪者，獎勵 +200")
+
+                # 3. 掠奪者產出
+                if real_m_count > 0:
+                    if not has_rewarded_first_marauder:
+                        step_reward += 500.0
+                        has_rewarded_first_marauder = True
+                        print("🥇 [首發] 掠奪者誕生，獎勵 +500")
                     
-                    # 達成 5 隻就給一個超大終結獎金
-                    if real_m_count >= 5:
-                        step_reward += 1000.0
-                    
-                    last_target_count = real_m_count
+                    if real_m_count > last_target_count:
+                        step_reward += (real_m_count - last_target_count) * 150.0
+                        last_target_count = real_m_count
 
                 # 【修正】刪除原本代碼中重複的 total_reward += step_reward
                 total_reward += step_reward

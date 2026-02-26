@@ -377,12 +377,15 @@ class ProductionAI:
             return self._select_unit(unit_type, BARRACKS_ID)
 
         
-        # [Action 18] 製造掠奪者
+        # [Action 18] 製造掠奪者 (優化版)
         elif action_id == 18:
             if actions.FUNCTIONS.Train_Marauder_quick.id in available:
                 return actions.FUNCTIONS.Train_Marauder_quick("now")
             
-            # 如果還沒選中兵營，優先嘗試選取
+            # 如果已經選中兵營但沒按鈕，代表科技不足，回傳 no_op 靜止等待
+            if any(u.unit_type == BARRACKS_ID for u in obs.observation.single_select):
+                return actions.FUNCTIONS.no_op()
+                
             return self._select_unit(unit_type, BARRACKS_ID)
         
         # [Action 19] 製造幽靈特務 (Ghost) - 150 M, 125 V
@@ -579,9 +582,13 @@ class ProductionAI:
                           np.clip(int((r + 0.5) * 16), 0, 63))
             return actions.FUNCTIONS.move_camera(target_pos)
         
-        # [Action 43] 經濟重啟 (抓回所有閒置工兵去採礦)
-        # [Action 41] 經濟重啟 (優化版：支援自動回家)
+        # [Action 41] 經濟重啟 (優化版：增加空閒檢查與自動回家)
         elif action_id == 41:
+            # --- 【新增檢查】如果沒有閒置工兵，且目前也沒選中工兵，直接不做事 ---
+            if player.idle_worker_count == 0 and not self._is_scv_selected(obs):
+                self.locked_action = None
+                return actions.FUNCTIONS.no_op()
+
             if self._is_scv_selected(obs):
                 y_m, x_m = (unit_type == MINERAL_FIELD_ID).nonzero()
                 if x_m.any():
@@ -591,8 +598,7 @@ class ProductionAI:
                     self.lock_timer = 0
                     return actions.FUNCTIONS.Smart_screen("now", target)
                 else:
-                    # 情況 B：選中人但畫面沒礦區，【修正】強制跳轉回基地，且不解除鎖定
-                    # 網格 1 通常是基地位置
+                    # 情況 B：選中人但畫面沒礦區，強制跳轉回基地，且不解除鎖定
                     return actions.FUNCTIONS.move_camera((16, 16)) 
             
             if actions.FUNCTIONS.select_idle_worker.id in available:
@@ -710,7 +716,7 @@ def main(argv):
             print("--- 啟動新對局 ---")
             obs_list = env.reset()
             while True:
-                action_id = random.randint(1, 41)##random.choice([41,42])#
+                action_id = 1#random.randint(1, 41)##random.choice([41,42])#
                 param = random.randint(1, 16)#1# # 網格限制 1-16
                 
                 sc2_action = agent.get_action(obs_list[0], action_id, parameter=param)
