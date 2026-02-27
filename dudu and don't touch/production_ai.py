@@ -153,7 +153,6 @@ class ProductionAI:
                 return actions.FUNCTIONS.Build_Barracks_screen("now", grid_pos)
             if self._is_scv_selected(obs):
                 self.locked_action = None
-                self.lock_timer = 0
                 return actions.FUNCTIONS.no_op()
 
             self.locked_action = 2
@@ -169,7 +168,6 @@ class ProductionAI:
                 return actions.FUNCTIONS.Build_Factory_screen("now", grid_pos)
             if self._is_scv_selected(obs):
                 self.locked_action = None
-                self.lock_timer = 0
                 return actions.FUNCTIONS.no_op()
             self.locked_action = 3 # 【關鍵】
             return self._select_scv(unit_type, available)
@@ -185,7 +183,6 @@ class ProductionAI:
                 return actions.FUNCTIONS.Build_Starport_screen("now", grid_pos)
             if self._is_scv_selected(obs):
                 self.locked_action = None
-                self.lock_timer = 0
                 return actions.FUNCTIONS.no_op()
             self.locked_action = 4 # 【關鍵】
             return self._select_scv(unit_type, available)
@@ -201,7 +198,6 @@ class ProductionAI:
                 return actions.FUNCTIONS.Build_FusionCore_screen("now", grid_pos)
             if self._is_scv_selected(obs):
                 self.locked_action = None
-                self.lock_timer = 0
                 return actions.FUNCTIONS.no_op()
             self.locked_action = 5
             return self._select_scv(unit_type, available)
@@ -217,7 +213,6 @@ class ProductionAI:
                 return actions.FUNCTIONS.Build_CommandCenter_screen("now", grid_pos)
             if self._is_scv_selected(obs):
                 self.locked_action = None
-                self.lock_timer = 0
                 return actions.FUNCTIONS.no_op()
             self.locked_action = 6
             return self._select_scv(unit_type, available)
@@ -233,7 +228,6 @@ class ProductionAI:
                 return actions.FUNCTIONS.Build_EngineeringBay_screen("now", grid_pos)
             if self._is_scv_selected(obs):
                 self.locked_action = None
-                self.lock_timer = 0
                 return actions.FUNCTIONS.no_op()
             self.locked_action = 7
             return self._select_scv(unit_type, available)
@@ -249,7 +243,6 @@ class ProductionAI:
                 return actions.FUNCTIONS.Build_SensorTower_screen("now", grid_pos)
             if self._is_scv_selected(obs):
                 self.locked_action = None
-                self.lock_timer = 0
                 return actions.FUNCTIONS.no_op()
             self.locked_action = 8
             return self._select_scv(unit_type, available)
@@ -265,7 +258,6 @@ class ProductionAI:
                 return actions.FUNCTIONS.Build_GhostAcademy_screen("now", grid_pos)
             if self._is_scv_selected(obs):
                 self.locked_action = None
-                self.lock_timer = 0
                 return actions.FUNCTIONS.no_op()
             self.locked_action = 9
             return self._select_scv(unit_type, available)
@@ -281,7 +273,6 @@ class ProductionAI:
                 return actions.FUNCTIONS.Build_Armory_screen("now", grid_pos)
             if self._is_scv_selected(obs):
                 self.locked_action = None
-                self.lock_timer = 0
                 return actions.FUNCTIONS.no_op()
             self.locked_action = 10
             return self._select_scv(unit_type, available)
@@ -312,7 +303,6 @@ class ProductionAI:
                 return actions.FUNCTIONS.Build_MissileTurret_screen("now", grid_pos)
             if self._is_scv_selected(obs):
                 self.locked_action = None
-                self.lock_timer = 0
                 return actions.FUNCTIONS.no_op()
             self.locked_action = 12
             return self._select_scv(unit_type, available)
@@ -328,7 +318,6 @@ class ProductionAI:
                 return actions.FUNCTIONS.Build_Bunker_screen("now", grid_pos)
             if self._is_scv_selected(obs):
                 self.locked_action = None
-                self.lock_timer = 0
                 return actions.FUNCTIONS.no_op()
             self.locked_action = 13
             return self._select_scv(unit_type, available)
@@ -583,22 +572,21 @@ class ProductionAI:
             return actions.FUNCTIONS.move_camera(target_pos)
         
         # [Action 41] 經濟重啟 (優化版：增加空閒檢查與自動回家)
+        # [Action 41] 經濟重啟修正
         elif action_id == 41:
-            # --- 【新增檢查】如果沒有閒置工兵，且目前也沒選中工兵，直接不做事 ---
             if player.idle_worker_count == 0 and not self._is_scv_selected(obs):
-                self.locked_action = None
+                self.locked_action = None # 無空閒，直接解鎖
                 return actions.FUNCTIONS.no_op()
 
             if self._is_scv_selected(obs):
                 y_m, x_m = (unit_type == MINERAL_FIELD_ID).nonzero()
                 if x_m.any():
-                    # 情況 A：畫面上看得到礦區，直接命令採礦並解鎖
                     target = (int(x_m.mean()), int(y_m.mean()))
                     self.locked_action = None
-                    self.lock_timer = 0
                     return actions.FUNCTIONS.Smart_screen("now", target)
                 else:
-                    # 情況 B：選中人但畫面沒礦區，強制跳轉回基地，且不解除鎖定
+                    # 【修正】強制回基地並「立刻解鎖」，避免鎖死在移動視角動作
+                    self.locked_action = None 
                     return actions.FUNCTIONS.move_camera((16, 16)) 
             
             if actions.FUNCTIONS.select_idle_worker.id in available:
