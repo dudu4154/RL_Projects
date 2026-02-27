@@ -1,0 +1,129 @@
+from pysc2.agents import base_agent
+from pysc2.lib import actions, features, units
+
+
+# -------------------------
+# 1) 你的 1~15 決策函式（先只回傳數字）
+# -------------------------
+def decide_action_code(my_units: int,
+                       enemy_units: int,
+                       enemy_has_aoe: bool,
+                       under_heavy_fire: bool,
+                       enemy_is_ranged: bool) -> int:
+    power_ratio = my_units / max(enemy_units, 1)
+
+    # AOE 且劣勢：分散
+    if enemy_has_aoe and power_ratio < 1.0:
+        return 2
+
+    # 被壓制且明顯劣勢：全撤
+    if under_heavy_fire and power_ratio < 0.8:
+        return 12
+
+    # 對方遠程多且我方不優：kite
+    if enemy_is_ranged and power_ratio < 1.0:
+        return 11
+
+    # 大優勢：全面進攻
+    if power_ratio >= 1.5:
+        return 15
+
+    # 均勢：凹形包夾
+    if 0.9 <= power_ratio <= 1.1:
+        return 3
+
+    # 小優勢：正面推進
+    if 1.1 < power_ratio < 1.5:
+        return 1
+
+    # 小劣勢：拉扯撤退
+    if 0.7 <= power_ratio < 0.9:
+        return 4
+
+    # 預設：防守卡位
+    return 8
+
+
+# -------------------------
+# 2) PySC2 Agent：偵查戰況 & 輸出 code
+# -------------------------
+class ScoutActionCodeAgent(base_agent.BaseAgent):
+    def __init__(self):
+        super().__init__()
+        self.prev_my_total_hp = None
+
+        # 你可以依你對手/地圖再補
+        self.AOE_THREATS = {
+            units.Terran.SiegeTank,
+            units.Terran.SiegeTankSieged,
+            units.Protoss.Colossus,
+            units.Protoss.Disruptor,
+            units.Zerg.Baneling,
+            units.Zerg.Infestor,
+        }
+
+        self.RANGED_UNITS = {
+            units.Terran.Marine,
+            units.Terran.Marauder,
+            units.Terran.Reaper,
+            units.Terran.Cyclone,
+            units.Protoss.Stalker,
+            units.Protoss.Adept,
+            units.Protoss.Immortal,
+            units.Zerg.Hydralisk,
+            units.Zerg.Roach,
+            units.Zerg.Queen,
+        }
+
+    def step(self, obs):
+        super().step(obs)
+
+        # ✅ 需要 raw interface：obs.observation.raw_units
+        raw_units = obs.observation.raw_units
+
+        me = features.PlayerRelative.SELF
+        enemy = features.PlayerRelative.ENEMY
+
+        my_army = []
+        enemy_army = []
+
+        for u in raw_units:
+            if u.alliance == me:
+                # 只抓有戰鬥能力的（你也可改成只看追獵者）
+                if u.unit_type in (units.Protoss.Stalker, units.Protoss.Zealot, units.Protoss.Adept, units.Protoss.Immortal):
+                    my_army.append(u)
+            elif u.alliance == enemy:
+                enemy_army.append(u)
+
+        my_units = len(my_army)
+        enemy_units = len(enemy_army)
+
+        # --- enemy_has_aoe ---
+        enemy_has_aoe = any(u.unit_type in self.AOE_THREATS for u in enemy_army)
+
+        # --- enemy_is_ranged ---
+        ranged_count = sum(1 for u in enemy_army if u.unit_type in self.RANGED_UNITS)
+        enemy_is_ranged = (ranged_count / max(enemy_units, 1)) >= 0.6  # 60% 以上視為遠程居多
+
+        # --- under_heavy_fire：用「我方總血量是否快速下降」粗估 ---
+        my_total_hp = sum((u.health + u.shield) for u in my_army)
+        if self.prev_my_total_hp is None:
+            under_heavy_fire = False
+        else:
+            # 你可以調整門檻：下降超過 15 視為被集火/壓制
+            under_heavy_fire = (self.prev_my_total_hp - my_total_hp) >= 15
+        self.prev_my_total_hp = my_total_hp
+
+        # ✅ 最終輸出：1~15 code（先只印數字）
+        code = decide_action_code(
+            my_units=my_units,
+            enemy_units=enemy_units,
+            enemy_has_aoe=enemy_has_aoe,
+            under_heavy_fire=under_heavy_fire,
+            enemy_is_ranged=enemy_is_ranged
+        )
+
+        print(code)
+
+        # 目前先不做操作：回傳 no-op（你之後再把 code -> 真正動作）
+        return actions.RAW_FUNCTIONS.no_op()
