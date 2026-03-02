@@ -249,39 +249,46 @@ def main(argv):
                     if any(u.unit_type == production_ai.SCV_ID for u in obs_data.multi_select):
                         is_scv_selected = True
 
-                # --- 4. 獎勵邏輯：引導 AI 主動切換視角 ---
-               # --- [正向里程碑獎勵系統] (在 train_dqn_on_top.py 的獎勵區塊) ---
-                step_reward = 0.0
+                # --- [正向里程碑獎勵系統] ---
+                step_reward = 0.0 
 
-                # 1. 偵測補給站 (一次性里程碑)
-                # 透過小地圖偵測補給站像素
-                curr_d_pixels = np.sum((next_m_unit == production_ai.SUPPLY_DEPOT_ID) & (next_m_relative == 1))
-                if curr_d_pixels > 0 and not has_rewarded_depot:
-                    step_reward += 50.0  # 給予 50 分獎勵
+                # 1. 補給站里程碑 (改用人口上限偵測，最穩定)
+                # 指揮中心提供 15 人口，補給站提供 8 人口
+                if obs_data.player.food_cap > 15 and not has_rewarded_depot:
+                    step_reward += 50.0
                     has_rewarded_depot = True
-                    print("🏠 首座補給站完工！開啟科技樹獎勵 +50")
+                    print(f"🏠 【人口突破】補給站完工 (上限: {obs_data.player.food_cap})，獎勵 +50")
 
-                # 2. 偵測兵營 (一次性)
-                if curr_b_count > 0 and not has_rewarded_barracks:
+                # 2. 兵營里程碑 (同時檢查螢幕與小地圖，增加魯棒性)
+                s_b_pixels = np.sum((next_s_unit == production_ai.BARRACKS_ID) & (next_s_relative == 1))
+                m_b_pixels = np.sum((next_m_unit == production_ai.BARRACKS_ID) & (next_m_relative == 1))
+                if (s_b_pixels > 0 or m_b_pixels > 0) and not has_rewarded_barracks:
                     step_reward += 100.0
                     has_rewarded_barracks = True
-                    print("🏭 首座兵營完工！獎勵 +100")
+                    print("🏭 【科技啟動】首座兵營完工，獎勵 +100")
 
-                # ... 後續科技實驗室與掠奪者獎勵 ...
+                # 3. 瓦斯廠里程碑
+                s_r_pixels = np.sum((next_s_unit == production_ai.REFINERY_ID) & (next_s_relative == 1))
+                m_r_pixels = np.sum((next_m_unit == production_ai.REFINERY_ID) & (next_m_relative == 1))
+                if (s_r_pixels > 0 or m_r_pixels > 0) and not has_rewarded_refinery:
+                    step_reward += 50.0
+                    has_rewarded_refinery = True
+                    print("🔥 【能源解鎖】首座瓦斯廠完工，獎勵 +50")
 
-                # 2. 科技實驗室里程碑 (產兵核心)
-                curr_t_pixels = np.sum((next_m_unit == production_ai.BARRACKS_TECHLAB_ID) & (next_m_relative == 1))
-                if curr_t_pixels > 0 and not has_rewarded_techlab:
-                    step_reward += 200.0 # 提高分量，引導 AI 突破瓶頸
+                # 4. 科技實驗室里程碑
+                s_t_pixels = np.sum((next_s_unit == production_ai.BARRACKS_TECHLAB_ID) & (next_s_relative == 1))
+                if s_t_pixels > 0 and not has_rewarded_techlab:
+                    step_reward += 200.0
                     has_rewarded_techlab = True
-                    print("🧪 [里程碑] 科技實驗室完工，解鎖掠奪者，獎勵 +200")
+                    print("🧪 【關鍵科技】科技實驗室掛載成功，獎勵 +200")
 
-                # 3. 掠奪者產出
+                # 5. 掠奪者產出獎勵
+                # 修正：包含降下的補給站 ID 20 判定
                 if real_m_count > 0:
                     if not has_rewarded_first_marauder:
                         step_reward += 500.0
                         has_rewarded_first_marauder = True
-                        print("🥇 [首發] 掠奪者誕生，獎勵 +500")
+                        print(f"🥇 【史詩成就】首隻掠奪者誕生！獎勵 +500")
                     
                     if real_m_count > last_target_count:
                         step_reward += (real_m_count - last_target_count) * 150.0
