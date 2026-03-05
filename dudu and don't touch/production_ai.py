@@ -8,23 +8,24 @@ from pysc2.env import sc2_env
 from pysc2.lib import actions, features  # 刪掉最後面的 , units
 
 # 定義人族單位 ID
-COMMAND_CENTER_ID = 18
-SUPPLY_DEPOT_ID = 19
-REFINERY_ID = 20
-BARRACKS_ID = 21
-ENGINEERING_BAY_ID = 22  
-BARRACKS_TECHLAB_ID = 37
-SCV_ID = 45
-MARAUDER_ID = 51
-MINERAL_FIELD_ID = 341
-GEYSER_ID = 342
+COMMAND_CENTER_ID = 18      # 指揮中心
+SUPPLY_DEPOT_ID = 19        # 補給站
+REFINERY_ID = 20           # 瓦斯煉油廠
+BARRACKS_ID = 21           # 兵營
+ENGINEERING_BAY_ID = 22     # 電機工程所
+BARRACKS_TECHLAB_ID = 37    # 兵營科技實驗室
+SCV_ID = 45                # 工兵 (SCV)
+MARAUDER_ID = 51           # 掠奪者
+MINERAL_FIELD_ID = 341      # 晶體礦
+GEYSER_ID = 342            # 瓦斯湧泉
+FACTORY_ID = 27            # 工廠
+STARPORT_ID = 28           # 星際港
+ARMORY_ID = 29             # 兵工廠
+FUSION_CORE_ID = 30        # 核融合核心
+GHOST_ACADEMY_ID = 26       # 幽靈特務學院
+ORBITAL_COMMAND_ID = 132    # 軌道指揮部
+
 BASE_LOCATION_CODE = 0
-FACTORY_ID = 27
-STARPORT_ID = 28
-ARMORY_ID = 29
-FUSION_CORE_ID = 30
-GHOST_ACADEMY_ID = 26
-ORBITAL_COMMAND_ID = 132
 PLANETARY_FORTRESS_ID = 130
 
 # =========================================================
@@ -32,16 +33,18 @@ PLANETARY_FORTRESS_ID = 130
 # =========================================================
 class DataCollector:
     def __init__(self):
+        # 確保 logs 資料夾存在
         if not os.path.exists("logs"):
             os.makedirs("logs")
+        # 以目前時間戳記建立檔案名稱
         self.filename = f"logs/terran_log_{int(time.time())}.csv"
+        # 寫入 CSV 標題列
         with open(self.filename, mode='w', newline='') as file:
             writer = csv.writer(file)
-            # 【新增】加入 Barracks 欄位
             writer.writerow(["Time", "Minerals", "Vespene", "Workers", "Ideal", "Barracks", "Action_ID"])
 
     def log_step(self, time_val, minerals, vespene, workers, ideal, barracks, action_id):
-        # 【更新】接收並寫入 barracks 參數
+        """ 將當前的遊戲數據寫入 CSV """
         display_time = float(time_val[0]) if hasattr(time_val, "__len__") else float(time_val)
         with open(self.filename, mode='a', newline='') as file:
             writer = csv.writer(file)
@@ -51,41 +54,38 @@ class DataCollector:
 # 🧠 生產大腦: 整合所有功能與修正
 # =========================================================
 class ProductionAI:
+    def __init__(self):
+        self.collector = DataCollector()
+        self.depots_built = 0
+        self.refinery_target = None
+        self.cc_x_screen = 42   # 預設螢幕中心點 X
+        self.cc_y_screen = 42   # 預設螢幕中心點 Y
+        self.gas_workers_assigned = 0
+        self.active_parameter = 1 # 目前選定的建築位置編號
+        self.locked_action = None # 用於處理需要多步驟完成的動作（如：選SCV -> 蓋建築）
+        self.lock_timer = 0       # 鎖定計時器，避免 AI 卡死
+
     def _is_scv_selected(self, obs):
+        """ 檢查當前畫面是否已經選中了 SCV """
         if len(obs.observation.single_select) > 0:
             return obs.observation.single_select[0].unit_type == SCV_ID
         if len(obs.observation.multi_select) > 0:
             return any(u.unit_type == SCV_ID for u in obs.observation.multi_select)
         return False
-    # --- 新增安全獲取函式 ---
-    def _get_safe_func(self, name):
-        try:
-            return getattr(actions.FUNCTIONS, name)
-        except KeyError:
-            return None
-        
-    def __init__(self):
-        self.collector = DataCollector()
-        self.depots_built = 0
-        self.refinery_target = None
-        self.cc_x_screen = 42
-        self.cc_y_screen = 42
-        self.gas_workers_assigned = 0
-        self.active_parameter = 1 
-        self.base_minimap_coords = None
-        self.locked_action = None
-        self.lock_timer = 0  # 【新增】鎖定計時器
 
     def _find_units_centers(self, unit_type, unit_id):
-        """ 尋找畫面上所有指定 ID 的建築中心點，避免點擊到空地 """
+        """ 
+        尋找畫面上所有指定 ID 建築的中心點。
+        這能確保 AI 點擊在建築物體上，而不是點到旁邊的空地 
+        """
         y, x = (unit_type == unit_id).nonzero()
         if not x.any(): return []
         
         centers = []
-        # 簡單的聚類技巧：找第一個點及其周圍像素
         temp_x, temp_y = list(x), list(y)
         while temp_x:
             bx, by = temp_x[0], temp_y[0]
+            # 使用像素遮罩尋找連通區域的中心點
             mask = (np.abs(np.array(temp_x) - bx) < 12) & (np.abs(np.array(temp_y) - by) < 12)
             centers.append((int(np.mean(np.array(temp_x)[mask])), int(np.mean(np.array(temp_y)[mask]))))
             temp_x = [px for i, px in enumerate(temp_x) if not mask[i]]
@@ -93,29 +93,38 @@ class ProductionAI:
         return centers
 
     def get_action(self, obs, action_id, parameter=None):
-        # --- A. 處理鎖定與超時 (確保連鎖不被中斷) ---
+        # --- 處理鎖定與超時 (建議設為 15) ---
         if self.locked_action is not None:
             self.lock_timer += 1
-            if self.lock_timer > 60:
+            if self.lock_timer > 15:
                 self.locked_action = None
                 self.lock_timer = 0
             else:
                 action_id = self.locked_action
-        if parameter is not None: self.active_parameter = parameter
         
+        if parameter is not None: 
+            self.active_parameter = parameter
+        
+        # 定義必要變數，避免 NameError
         unit_type = obs.observation.feature_screen[features.SCREEN_FEATURES.unit_type.index]
         player = obs.observation.player
         available = obs.observation.available_actions
+
+        # --- 🎯 自由位置坐標系 ---
+        # 為了讓 AI 能蓋出「一堵牆」，我們縮短間距並讓它有線性移動的可能
+        # 我們假設 parameter 1-16 代表畫面上的一個 4x4 區域，但縮小間距到 11 像素
+        # 11 像素大約是補給站的寬度，這樣蓋起來會「剛好黏住」
+        # --- 🎯 64 點高密度坐標系 (8x8 網格) ---
+        grid_size = 8  # 從 4 改成 8
+        p_idx = max(0, self.active_parameter - 1) % 64 # 確保不超過 63
         
-        # 定義建築網格
-        b_id = self.active_parameter
-        # 將網格間距從 21 縮小或位移，避免點擊中心 (42, 42)
-        row, col = (b_id - 1) // 4, (b_id - 1) % 4
-        # 修正：讓 x 和 y 避開中央區域 (25~60 像素區間)
-        tx = (col * 20) + 12
-        ty = (row * 20) + 12
-        if 25 < tx < 60: tx = 15 if tx < 42 else 70 # 強制推離中心
-        if 25 < ty < 60: ty = 15 if ty < 42 else 70
+        row = p_idx // grid_size
+        col = p_idx % grid_size
+
+        # 間距設為 10，這樣參數 1 號跟 2 號蓋出來的補給站會剛好黏住
+        tx = 10 + (col * 10)
+        ty = 10 + (row * 10)
+
         grid_pos = (np.clip(tx, 0, 83), np.clip(ty, 0, 83))
 
        
@@ -131,7 +140,6 @@ class ProductionAI:
                 self.lock_timer = 0
                 return actions.FUNCTIONS.Build_SupplyDepot_screen("now", grid_pos)
 
-            # B. 【修正點】如果已經選中工兵，就不要再重複執行 _select_scv
             # 這樣可以讓遊戲引擎有時間把建築選單顯示出來
             if self._is_scv_selected(obs):
                 self.locked_action = 1
@@ -550,25 +558,11 @@ class ProductionAI:
         # [Action 40]移動視角
         # [Action 40] 智慧移動視角 (整合編隊跳轉邏輯)
         elif action_id == 40:
-            block_id = self.active_parameter
-            
-            # A. 判斷目標網格是否為基地位置 (0=左上 1, 1=右下 16)
-            is_base_grid = (block_id == 1 and BASE_LOCATION_CODE == 0) or \
-                           (block_id == 16 and BASE_LOCATION_CODE == 1)
-            
-            # B. 檢查編隊 1 是否已經設定為主堡
-            control_groups = obs.observation.control_groups
-            has_cc_in_group1 = (control_groups[1][0] == COMMAND_CENTER_ID)
-
-            # C. 智慧判定：能用編隊跳轉就用，不能就用相機移動
-            if is_base_grid and has_cc_in_group1 and (actions.FUNCTIONS.select_control_group.id in available):
-                # print(f"🚀 透過編隊 1 快捷鍵跳轉回基地 (網格 {block_id})")
-                return actions.FUNCTIONS.select_control_group("recall", 1)
-
+            p_idx = max(0, self.active_parameter - 1) % 64
             # D. 標準網格移動
-            r, c = (block_id - 1) // 4, (block_id - 1) % 4
-            target_pos = (np.clip(int((c + 0.5) * 16), 0, 63), 
-                          np.clip(int((r + 0.5) * 16), 0, 63))
+            r, c = p_idx // 8, p_idx % 8
+            target_pos = (np.clip(int((c + 0.5) * 8), 0, 63), 
+                          np.clip(int((r + 0.5) * 8), 0, 63))
             return actions.FUNCTIONS.move_camera(target_pos)
         
         # [Action 41] 經濟重啟 (優化版：增加空閒檢查與自動回家)
@@ -600,37 +594,43 @@ class ProductionAI:
 
     # --- 內部輔助函式 ---
     def _select_unit(self, unit_type, unit_id):
-        # 使用歸屬過濾 (Relative == 1) 避免點到敵人的東西
         y, x = (unit_type == unit_id).nonzero()
         if x.any():
-            # 取中心點點擊
-            return actions.FUNCTIONS.select_point("select", (int(x.mean()), int(y.mean())))
+            i = random.randint(0, len(x) - 1) # 增加安全性檢查
+            target = (x[i], y[i])
+            return actions.FUNCTIONS.select_point("select", target)
+        
+        # 找不到單位時，如果是鎖定狀態則強制解鎖
+        self.locked_action = None
         return actions.FUNCTIONS.no_op()
+    
+    def _get_safe_func(self, name):
+        try:
+            if hasattr(actions.FUNCTIONS, name):
+                return getattr(actions.FUNCTIONS, name)
+        except (KeyError, AttributeError):
+            pass
+        return actions.FUNCTIONS.no_op
 
     # --- 修改後的選取工兵邏輯 ---
 
     def _select_scv(self, unit_type, available):
-        # 1. 優先選取閒置工兵 (最穩定)
         if actions.FUNCTIONS.select_idle_worker.id in available:
             return actions.FUNCTIONS.select_idle_worker("select")
         
-        # 2. 如果螢幕上有看到工兵，隨機點一個
-        # 將 select_all_type 改為單點選取，確保建築面板會出現
         y, x = (unit_type == SCV_ID).nonzero()
         if x.any():
             idx = random.randint(0, len(x) - 1)
-            # 使用 "select" 參數選取單一工兵
             return actions.FUNCTIONS.select_point("select", (x[idx], y[idx]))
             
-        # 3. 【修正】如果都沒看到，去點擊礦堆 (Mineral Field) 周邊
-        # 礦堆一定在基地旁邊，那裡一定有工兵在採礦
         y_m, x_m = (unit_type == MINERAL_FIELD_ID).nonzero()
         if x_m.any():
-            # 隨機點擊礦區的一個點，極高機率選中正在採礦的工兵
             idx = random.randint(0, len(x_m) - 1)
             return actions.FUNCTIONS.select_point("select", (x_m[idx], y_m[idx]))
 
-        return actions.FUNCTIONS.no_op()
+        # 【關鍵補強】如果畫面上什麼都沒有，回傳移動相機回基地的動作
+        # 假設 0 號網格是你的基地位置
+        return actions.FUNCTIONS.move_camera((16, 16))
     
     def _calc_depot_pos(self):
         """ 三角形排列座標計算 """
@@ -706,8 +706,8 @@ def main(argv):
             print("--- 啟動新對局 ---")
             obs_list = env.reset()
             while True:
-                action_id = 1#random.randint(1, 41)##random.choice([41,42])#
-                param = random.randint(1, 16)#1# # 網格限制 1-16
+                action_id = 1#random.randint(1, 41)##random.choice([1,2,3])#
+                param = random.randint(1, 64)#1# # 網格限制 1-16
                 
                 sc2_action = agent.get_action(obs_list[0], action_id, parameter=param)
                 

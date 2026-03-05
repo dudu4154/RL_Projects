@@ -83,20 +83,26 @@ class TrainingLogger:
 # 🧠 深度學習模型 (DQN)
 # =========================================================
 class QNetwork(nn.Module):
-    def __init__(self, state_size, action_size, param_size=16):
+    def __init__(self, state_size, action_size):
         super(QNetwork, self).__init__()
+        # 共同特徵層
         self.common = nn.Sequential(
             nn.Linear(state_size, 128), nn.ReLU(),
             nn.Linear(128, 64), nn.ReLU()
         )
-        # 動作頭：決定執行哪個 Action (0-9, 40)
+        # 動作頭：輸出 43 個動作的 Q 值
         self.action_head = nn.Linear(64, action_size)
-        # 參數頭：決定目標網格 (1-16)
-        self.param_head = nn.Linear(64, param_size)
+        
+        # 參數頭：輸出 64 個網格位置的 Q 值
+        # 注意：名字必須與舊模型一致 (param_head)，且輸入維度應為 64
+        self.param_head = nn.Linear(64, 64) 
 
     def forward(self, x):
         x = self.common(x)
-        return self.action_head(x), self.param_head(x) # 同時回傳兩組 Q 值
+        # 同時回傳動作與參數的預測值
+        return self.action_head(x), self.param_head(x)
+    
+    
     
 def get_state_vector(obs, current_block, target_project_id):
     player = obs.observation.player
@@ -121,7 +127,7 @@ def get_state_vector(obs, current_block, target_project_id):
         np.sum((m_unit == production_ai.SUPPLY_DEPOT_ID) & (m_relative == 1)),
         np.sum((m_unit == production_ai.REFINERY_ID) & (m_relative == 1)),
         np.sum((m_unit == production_ai.BARRACKS_TECHLAB_ID) & (m_relative == 1)),
-        current_block / 16.0,
+        current_block / 64.0,
         is_scv_selected, 
         is_cc_selected,
         target_project_id / 40.0
@@ -151,7 +157,7 @@ def main(argv):
         brain_model.load_state_dict(torch.load(model_path))
         print("✅ 載入成功！接續之前的記憶繼續訓練...")
 
-    epsilon = 1.0; epsilon_decay = 0.999; gamma = 0.99 
+    epsilon = 1.00; epsilon_decay = 0.999; gamma = 0.99 
 
     with sc2_env.SC2Env(
         map_name="Simple96",
@@ -193,7 +199,7 @@ def main(argv):
                 # Epsilon-Greedy 選擇 (a_id 決定做什麼，p_id 決定在哪做)
                 if random.random() <= epsilon:
                     a_id = random.randint(1, 41) 
-                    p_id = random.randint(1, 16)
+                    p_id = random.randint(1, 64)
                 else:
                     with torch.no_grad():
                         q_actions, q_params = brain_model(state_t.unsqueeze(0))
