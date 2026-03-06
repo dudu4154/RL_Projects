@@ -5,7 +5,7 @@ import csv
 import time
 from absl import app
 from pysc2.env import sc2_env
-from pysc2.lib import actions, features  # 刪掉最後面的 , units
+from pysc2.lib import actions, features
 
 # 定義人族單位 ID
 COMMAND_CENTER_ID = 18      # 指揮中心
@@ -63,13 +63,15 @@ class ProductionAI:
         self.active_parameter = 1     # 目前選定的建築位置編號
         self.locked_action = None     # 用於處理需要多步驟完成的動作（如：選SCV -> 蓋建築）
         self.lock_timer = 0           # 鎖定計時器，避免 AI 卡死
+        self.base_location_code = 0
+        self.locked_target = None
 
     #檢查當前選取狀態中是否包含工兵。
     def _is_scv_selected(self, obs):
         # 檢查單一選取：使用 len() 判斷是否有選中單位
         if len(obs.observation.single_select) > 0:
             return obs.observation.single_select[0].unit_type == SCV_ID
-            
+        
         # 檢查複數選取：同樣使用 len()
         if len(obs.observation.multi_select) > 0:
             # 只要選取的清單中包含任何一個工兵，就視為已選中
@@ -94,17 +96,19 @@ class ProductionAI:
         return centers
 
     def get_action(self, obs, action_id, parameter=None):
-        # --- 處理鎖定與超時  ---
+        # --- 處理鎖定與超時 ---
         if self.locked_action is not None:
             self.lock_timer += 1
-            if self.lock_timer > 6:
+            if self.lock_timer > 16:
+                self.locked_target = None 
                 self.locked_action = None
                 self.lock_timer = 0
             else:
                 action_id = self.locked_action
-        
-        if parameter is not None: 
-            self.active_parameter = parameter
+                # 【關鍵修正】鎖定期間停止更新 active_parameter，維持最初的奇偶數意圖
+        else:
+            if parameter is not None: 
+                self.active_parameter = parameter
         
         # 定義必要變數，避免 NameError
         unit_type = obs.observation.feature_screen[features.SCREEN_FEATURES.unit_type.index]
@@ -181,50 +185,91 @@ class ProductionAI:
             self.locked_action = 2
             return self._select_scv_prioritized(obs, unit_type, available)
         
+        # [Action 3] 建造工廠 (150 M, 100 V)
+        # [Action 3] 建造工廠 (150 M, 100 V)
         elif action_id == 3:
             if player.minerals < 150 or player.vespene < 100:
                 self.locked_action = None
                 return actions.FUNCTIONS.no_op()
+            
+            # 1. 檢查建築按鈕是否已出現
             if actions.FUNCTIONS.Build_Factory_screen.id in available:
                 self.locked_action = None 
                 self.lock_timer = 0
                 return actions.FUNCTIONS.Build_Factory_screen("now", grid_pos)
+            
+            # 2. 選中工兵後，嘗試打開高級選單 (安全名稱查找)
             if self._is_scv_selected(obs):
-                self.locked_action = 3
+                adv_menu = None
+                for name in ["Build_Advanced_quick", "Build_Menu_Advanced_quick", "Build_Advanced_Terran_quick"]:
+                    try:
+                        adv_menu = getattr(actions.FUNCTIONS, name)
+                        break
+                    except (KeyError, AttributeError): continue
+                
+                if adv_menu and adv_menu.id in available:
+                    self.locked_action = 3
+                    return adv_menu("now")
                 return actions.FUNCTIONS.no_op()
-            self.locked_action = 3 # 【關鍵】
+
+            self.locked_action = 3
             return self._select_scv_prioritized(obs, unit_type, available)
 
         # [Action 4] 建造星際港 (150 M, 100 V)
         elif action_id == 4:
-            if player.minerals < 150 or player.vespene < 100 :
+            if player.minerals < 150 or player.vespene < 100:
                 self.locked_action = None
                 return actions.FUNCTIONS.no_op()
+            
             if actions.FUNCTIONS.Build_Starport_screen.id in available:
                 self.locked_action = None 
                 self.lock_timer = 0
                 return actions.FUNCTIONS.Build_Starport_screen("now", grid_pos)
+            
             if self._is_scv_selected(obs):
-                self.locked_action = 4
+                adv_menu = None
+                for name in ["Build_Advanced_quick", "Build_Menu_Advanced_quick"]:
+                    try:
+                        adv_menu = getattr(actions.FUNCTIONS, name)
+                        break
+                    except (KeyError, AttributeError): continue
+                
+                if adv_menu and adv_menu.id in available:
+                    self.locked_action = 4
+                    return adv_menu("now")
                 return actions.FUNCTIONS.no_op()
-            self.locked_action = 4 # 【關鍵】
+
+            self.locked_action = 4
             return self._select_scv_prioritized(obs, unit_type, available)
 
         # [Action 5] 建造核融合核心 (150 M, 150 V)
         elif action_id == 5:
-            if player.minerals < 150 or player.vespene < 150 :
+            if player.minerals < 150 or player.vespene < 150:
                 self.locked_action = None
                 return actions.FUNCTIONS.no_op()
+            
+            # 1. 檢查建築按鈕是否已出現
             if actions.FUNCTIONS.Build_FusionCore_screen.id in available:
                 self.locked_action = None 
                 self.lock_timer = 0
                 return actions.FUNCTIONS.Build_FusionCore_screen("now", grid_pos)
+            
+            # 2. 選中工兵後，安全嘗試打開高級選單
             if self._is_scv_selected(obs):
-                self.locked_action = 5
+                adv_menu = None
+                for name in ["Build_Advanced_quick", "Build_Menu_Advanced_quick"]:
+                    try:
+                        adv_menu = getattr(actions.FUNCTIONS, name)
+                        break
+                    except (KeyError, AttributeError): continue
+                
+                if adv_menu and adv_menu.id in available:
+                    self.locked_action = 5
+                    return adv_menu("now")
                 return actions.FUNCTIONS.no_op()
+
             self.locked_action = 5
             return self._select_scv_prioritized(obs, unit_type, available)
-
         # [Action 6] 建造指揮中心 (400 M)
         elif action_id == 6:
             if player.minerals < 400 :
@@ -275,13 +320,28 @@ class ProductionAI:
             if player.minerals < 150 or player.vespene < 50:
                 self.locked_action = None
                 return actions.FUNCTIONS.no_op()
+            
+            # 1. 檢查建築按鈕是否已出現
             if actions.FUNCTIONS.Build_GhostAcademy_screen.id in available:
                 self.locked_action = None 
                 self.lock_timer = 0
                 return actions.FUNCTIONS.Build_GhostAcademy_screen("now", grid_pos)
+            
+            # 2. 選中工兵後，安全嘗試打開高級選單
             if self._is_scv_selected(obs):
-                self.locked_action = 9
+                adv_menu = None
+                # 嘗試所有可能的 API 名稱以避開 KeyError
+                for name in ["Build_Advanced_quick", "Build_Menu_Advanced_quick", "Build_Advanced_Terran_quick"]:
+                    try:
+                        adv_menu = getattr(actions.FUNCTIONS, name)
+                        break
+                    except (KeyError, AttributeError): continue
+                
+                if adv_menu and adv_menu.id in available:
+                    self.locked_action = 9
+                    return adv_menu("now") # 打開選單不帶座標
                 return actions.FUNCTIONS.no_op()
+
             self.locked_action = 9
             return self._select_scv_prioritized(obs, unit_type, available)
 
@@ -290,13 +350,27 @@ class ProductionAI:
             if player.minerals < 150 or player.vespene < 100:
                 self.locked_action = None
                 return actions.FUNCTIONS.no_op()
+            
+            # 1. 檢查建築按鈕是否已出現
             if actions.FUNCTIONS.Build_Armory_screen.id in available:
                 self.locked_action = None 
                 self.lock_timer = 0
                 return actions.FUNCTIONS.Build_Armory_screen("now", grid_pos)
+            
+            # 2. 開啟高級選單
             if self._is_scv_selected(obs):
-                self.locked_action = 10
+                adv_menu = None
+                for name in ["Build_Advanced_quick", "Build_Menu_Advanced_quick"]:
+                    try:
+                        adv_menu = getattr(actions.FUNCTIONS, name)
+                        break
+                    except (KeyError, AttributeError): continue
+                
+                if adv_menu and adv_menu.id in available:
+                    self.locked_action = 10
+                    return adv_menu("now")
                 return actions.FUNCTIONS.no_op()
+
             self.locked_action = 10
             return self._select_scv_prioritized(obs, unit_type, available)
         
@@ -424,17 +498,42 @@ class ProductionAI:
                 return actions.FUNCTIONS.Train_WidowMine_quick("now")
             return self._select_unit(unit_type, FACTORY_ID)
 
-        # [Action 23] 製造工程坦克 (Siege Tank) - 150 M, 125 V
+        # [Action 23] 製造工程坦克 (Siege Tank) - 修正選取邏輯
         elif action_id == 23:
+            # 1. 資源與按鈕檢查
             if player.minerals >= 150 and player.vespene >= 125 and actions.FUNCTIONS.Train_SiegeTank_quick.id in available:
                 return actions.FUNCTIONS.Train_SiegeTank_quick("now")
+            
+            # 2. 如果沒按鈕，我們需要選取「有科技實驗室」的軍工廠
+            # 這裡簡單化處理：先獲取實驗室的位置，並點擊它左邊一點點（通常是軍工廠主體）
+            techlab_y, techlab_x = (unit_type == 38).nonzero() # 38 是軍工廠科技實驗室的 ID
+            if techlab_x.any():
+                # 點擊實驗室中心偏左 10 像素的位置（嘗試選中本體）
+                target = (max(0, int(techlab_x.mean()) - 10), int(techlab_y.mean()))
+                return actions.FUNCTIONS.select_point("select", target)
+            
+            # 3. 如果連實驗室都沒看到，才隨機選工廠
             return self._select_unit(unit_type, FACTORY_ID)
-
+        
         # [Action 24] 製造颶風飛彈車 (Cyclone) - 150 M, 100 V
         elif action_id == 24:
+            # 1. 資源與按鈕檢查
             if player.minerals >= 150 and player.vespene >= 100 and actions.FUNCTIONS.Train_Cyclone_quick.id in available:
                 return actions.FUNCTIONS.Train_Cyclone_quick("now")
-            return self._select_unit(unit_type, FACTORY_ID)
+            
+            # 2. 核心修正：使用 Action 23 的成功邏輯，尋找科技實驗室 (ID 38)
+            techlab_y, techlab_x = (unit_type == 38).nonzero() 
+            if techlab_x.any():
+                # 點擊實驗室中心偏左 12 像素的位置，確保選中本體
+                target = (max(0, int(techlab_x.mean()) - 12), int(techlab_y.mean()))
+                return actions.FUNCTIONS.select_point("select", target)
+            
+            # 3. 若沒看到實驗室，則退而求其次點擊軍工廠中心
+            factory_centers = self._find_units_centers(unit_type, FACTORY_ID)
+            if factory_centers:
+                return actions.FUNCTIONS.select_point("select", random.choice(factory_centers))
+                
+            return actions.FUNCTIONS.no_op()
 
         # [Action 25] 製造雷神 (Thor) - 300 M, 200 V
         elif action_id == 25:
@@ -460,17 +559,65 @@ class ProductionAI:
                 return actions.FUNCTIONS.Train_Liberator_quick("now")
             return self._select_unit(unit_type, STARPORT_ID)
 
-        # [Action 29] 製造渡鴉 (Raven) - 100 M, 200 V
+        # [Action 29] 製造渡鴉 (強化指令版)
         elif action_id == 29:
-            if player.minerals >= 100 and player.vespene >= 200 and actions.FUNCTIONS.Train_Raven_quick.id in available:
-                return actions.FUNCTIONS.Train_Raven_quick("now")
-            return self._select_unit(unit_type, STARPORT_ID)
+            raven_act = self._get_safe_func("Train_Raven_quick")
+            if raven_act == actions.FUNCTIONS.no_op:
+                raven_act = self._get_safe_func("Train_Raven_Starport_quick")
 
+            # A. 如果按鈕可用
+            if raven_act.id in available:
+                if player.minerals >= 100 and player.vespene >= 150:
+                    self.locked_action = None; self.locked_target = None; self.lock_timer = 0
+                    return raven_act("now")
+                else:
+                    # 【關鍵修正】資源不足時「不要解鎖」，繼續保持選取直到超時或資源足夠
+                    return actions.FUNCTIONS.no_op()
+
+            # B. 鎖定等待期間
+            if self.locked_action == 29 and self.locked_target is not None:
+                return actions.FUNCTIONS.no_op()
+
+            # C. 執行選取
+            techlab_centers = self._find_units_centers(unit_type, 39)
+            if techlab_centers:
+                self.locked_target = (np.clip(techlab_centers[0][0] - 12, 0, 83), techlab_centers[0][1])
+                self.locked_action = 29; self.lock_timer = 1
+                return actions.FUNCTIONS.select_point("select", self.locked_target)
+            
+            self.locked_action = None
+            return actions.FUNCTIONS.no_op()
+        
         # [Action 30] 製造戰巡艦 (Battlecruiser) - 400 M, 300 V
         elif action_id == 30:
-            if player.minerals >= 400 and player.vespene >= 300 and actions.FUNCTIONS.Train_Battlecruiser_quick.id in available:
-                return actions.FUNCTIONS.Train_Battlecruiser_quick("now")
-            return self._select_unit(unit_type, STARPORT_ID)
+            # 1. 資源檢查 (如果資源不足，直接放棄並解鎖)
+            if player.minerals < 400 or player.vespene < 300:
+                self.locked_action = None; self.locked_target = None
+                return actions.FUNCTIONS.no_op()
+
+            # 2. 獲取按鈕
+            train_act = self._get_safe_func("Train_Battlecruiser_quick")
+            
+            # 3. 如果按鈕已經在畫面上，直接生產
+            if train_act.id in available:
+                self.locked_action = None; self.locked_target = None; self.lock_timer = 0
+                return train_act("now")
+            
+            # 4. 如果正在鎖定等待按鈕加載
+            if self.locked_action == 30 and self.locked_target is not None:
+                return actions.FUNCTIONS.no_op()
+
+            # 5. 核心邏輯：尋找星際港科技實驗室 (ID 39)
+            techlab_centers = self._find_units_centers(unit_type, 39)
+            if techlab_centers:
+                # 點擊第一個實驗室左側 12 像素處 (選中星際港主體)
+                self.locked_target = (np.clip(techlab_centers[0][0] - 12, 0, 83), techlab_centers[0][1])
+                self.locked_action = 30; self.lock_timer = 1
+                return actions.FUNCTIONS.select_point("select", self.locked_target)
+            
+            # 6. 若沒看到實驗室，說明前提未達成，解鎖讓 AI 執行 Action 36
+            self.locked_action = None
+            return actions.FUNCTIONS.no_op()
 
         # [Action 31] 製造女妖轟炸機 (Banshee) - 150 M, 100 V
         elif action_id == 31:
@@ -520,26 +667,76 @@ class ProductionAI:
                 return actions.FUNCTIONS.select_point("select", random.choice(barracks_centers))
             return actions.FUNCTIONS.no_op()
 
-        # [Action 35] 軍工廠升級 (奇數: 科技實驗室 / 偶數: 反應爐)
+        # [Action 35] 軍工廠升級 (修正版：增加掛件偵測)
         elif action_id == 35:
-            if self.active_parameter % 2 == 1:
-                if player.minerals >= 50 and player.vespene >= 25 and actions.FUNCTIONS.Build_TechLab_Factory_quick.id in available:
-                    return actions.FUNCTIONS.Build_TechLab_Factory_quick("now")
-            else:
-                if player.minerals >= 50 and player.vespene >= 50 and actions.FUNCTIONS.Build_Reactor_Factory_quick.id in available:
-                    return actions.FUNCTIONS.Build_Reactor_Factory_quick("now")
+            # 1. 判定要蓋哪種掛件
+            is_tech_lab = (self.active_parameter % 2 == 1)
+            action_name = "Build_TechLab_quick" if is_tech_lab else "Build_Reactor_quick"
+            # 備用名稱 (部分版本使用特定名稱)
+            alt_name = "Build_TechLab_Factory_quick" if is_tech_lab else "Build_Reactor_Factory_quick"
+            
+            action = self._get_safe_func(action_name)
+            if action == actions.FUNCTIONS.no_op:
+                action = self._get_safe_func(alt_name)
+
+            # 2. 資源檢查
+            req_m, req_v = (50, 25) if is_tech_lab else (50, 50)
+            if player.minerals < req_m or player.vespene < req_v:
+                return actions.FUNCTIONS.no_op()
+
+            # 3. 如果按鈕可用，直接升級
+            if action.id in available:
+                return action("now")
+
+            # 4. 如果沒看到按鈕，檢查畫面上是否已經有實驗室 (ID: 38) 或反應爐 (ID: 40)
+            # 如果已經有掛件了，就不要再點工廠，直接結束動作
+            addon_y, addon_x = ((unit_type == 38) | (unit_type == 40)).nonzero()
+            if addon_x.any():
+                # 簡單判定：如果掛件數量等於工廠數量，代表都滿了
+                factory_centers = self._find_units_centers(unit_type, FACTORY_ID)
+                if len(addon_x) >= len(factory_centers) * 10: # 像素點粗估
+                    return actions.FUNCTIONS.no_op()
+
+            # 5. 精確選取軍工廠
             return self._select_unit(unit_type, FACTORY_ID)
-
-        # [Action 36] 星際港升級 (奇數: 科技實驗室 / 偶數: 反應爐)
+        
+        # [Action 36] 星際港升級 (意圖固定版)
         elif action_id == 36:
-            if self.active_parameter % 2 == 1:
-                if player.minerals >= 50 and player.vespene >= 25 and actions.FUNCTIONS.Build_TechLab_Starport_quick.id in available:
-                    return actions.FUNCTIONS.Build_TechLab_Starport_quick("now")
-            else:
-                if player.minerals >= 50 and player.vespene >= 50 and actions.FUNCTIONS.Build_Reactor_Starport_quick.id in available:
-                    return actions.FUNCTIONS.Build_Reactor_Starport_quick("now")
-            return self._select_unit(unit_type, STARPORT_ID)
+            # 受 get_action 開頭的保護，這裏的 is_tech_lab 在鎖定期間不會變動
+            is_tech_lab = (self.active_parameter % 2 == 1)
+            req_m, req_v = (50, 25) if is_tech_lab else (50, 50)
+            
+            # 資源檢查
+            if player.minerals < req_m or player.vespene < req_v:
+                self.locked_action = None; self.locked_target = None
+                return actions.FUNCTIONS.no_op()
 
+            # 搜尋正確的升級按鈕
+            target_action = None
+            action_names = ["Build_TechLab_Starport_quick", "Build_TechLab_quick"] if is_tech_lab else \
+                           ["Build_Reactor_Starport_quick", "Build_Reactor_quick"]
+            for name in action_names:
+                func = self._get_safe_func(name)
+                if func.id in available: target_action = func; break
+
+            if target_action:
+                self.locked_action = None; self.locked_target = None; self.lock_timer = 0
+                return target_action("now")
+
+            # 鎖定中等待按鈕出現
+            if self.locked_action == 36 and self.locked_target is not None:
+                return actions.FUNCTIONS.no_op()
+
+            # 選取動作
+            starport_centers = self._find_units_centers(unit_type, STARPORT_ID)
+            if starport_centers:
+                # 這裡建議過濾掉已有掛件的建築，邏輯同你目前的代碼
+                self.locked_target = starport_centers[0]
+                self.locked_action = 36; self.lock_timer = 1
+                return actions.FUNCTIONS.select_point("select", self.locked_target)
+            
+            self.locked_action = None; return actions.FUNCTIONS.no_op()
+        
         # [Action 37] 核融合核心升級 (奇數: 大和砲 / 偶數: 戰巡艦加速)
         elif action_id == 37:
             act_name = "Research_BattlecruiserWeaponRefit_quick" if self.active_parameter % 2 == 1 else "Research_BattlecruiserTacticalJump_quick"
@@ -606,7 +803,34 @@ class ProductionAI:
             
             return actions.FUNCTIONS.no_op()
         
+        # [Action 42] 派遣工兵採集瓦斯 (手動計數，一個動作派一隻)
+        elif action_id == 42:
+            refinery_centers = self._find_units_centers(unit_type, REFINERY_ID)
+            
+            # 沒瓦斯廠就重置計數並解鎖
+            if not refinery_centers:
+                self.gas_workers_assigned = 0
+                self.locked_action = None
+                return actions.FUNCTIONS.no_op()
 
+            # 上限檢查：每個瓦斯廠最多 3 人 (手動計數器判定)
+            if self.gas_workers_assigned >= len(refinery_centers) * 3:
+                self.locked_action = None
+                return actions.FUNCTIONS.no_op()
+
+            # 執行階段：如果已經選中工兵，命令其前往瓦斯廠中心
+            if self.locked_action == 42 and self.lock_timer > 0 and self._is_scv_selected(obs):
+                target = random.choice(refinery_centers)
+                self.gas_workers_assigned += 1  # 成功指派，手動加 1
+                self.locked_action = None
+                self.lock_timer = 0
+                return actions.FUNCTIONS.Smart_screen("now", target)
+
+            # 選人階段：去礦區抓一個非瓦斯工 (調用你定義的過濾函式)
+            self.locked_action = 42
+            self.lock_timer = 1
+            return self._select_mineral_worker(obs, unit_type, available)
+        
     # --- 內部輔助函式 ---
     def _select_unit(self, unit_type, unit_id):
         y, x = (unit_type == unit_id).nonzero()
@@ -630,40 +854,63 @@ class ProductionAI:
     # --- 修改後的選取工兵邏輯 ---
 
     def _select_scv_prioritized(self, obs, unit_type, available):
-        """ 
-        優先級選取工兵：1.空閒 2.採礦 3.採瓦斯 4.畫面上的其他SCV
-        """
-        # 1. 優先選取空閒工兵
+        """ 基礎選人：空閒 > 採礦 > 採瓦斯 """
+        if actions.FUNCTIONS.select_idle_worker.id in available:
+            return actions.FUNCTIONS.select_idle_worker("select")
+            
+        y, x = (unit_type == SCV_ID).nonzero()
+        
+        # --- 核心修正：防止畫面上沒有 SCV 時導致報錯 ---
+        if not x.any():
+            # 找不到人時，強制移回主基地尋找工兵
+            return actions.FUNCTIONS.move_camera((16, 16)) 
+        
+        # 優先抓礦工 (距離礦脈 12 像素內)
+        m_y, m_x = (unit_type == MINERAL_FIELD_ID).nonzero()
+        if m_x.any():
+            for i in range(len(x)):
+                dist = np.min(np.sqrt((m_x - x[i])**2 + (m_y - y[i])**2))
+                if dist < 12: return actions.FUNCTIONS.select_point("select", (x[i], y[i]))
+        
+        # 沒礦工才隨機抓
+        idx = random.randint(0, len(x) - 1)
+        return actions.FUNCTIONS.select_point("select", (x[idx], y[idx]))
+    def _select_mineral_worker(self, obs, unit_type, available):
+        """ 專門尋找「遠離瓦斯」且「靠近礦脈」的工兵 """
         if actions.FUNCTIONS.select_idle_worker.id in available:
             return actions.FUNCTIONS.select_idle_worker("select")
         
-        # 獲取所有 SCV 的位置
         scv_y, scv_x = (unit_type == SCV_ID).nonzero()
-        if not scv_x.any():
-            # 如果畫面上完全沒 SCV，強制視角回主基地找人
-            return actions.FUNCTIONS.move_camera((16, 16))
-
-        # 2. 尋找正在採礦的 SCV (靠近晶體礦的)
         m_y, m_x = (unit_type == MINERAL_FIELD_ID).nonzero()
-        if m_x.any():
-            for i in range(len(scv_x)):
-                # 檢查該 SCV 是否靠近任何礦脈 (距離小於 5 像素)
-                dist = np.min(np.sqrt((m_x - scv_x[i])**2 + (m_y - scv_y[i])**2))
-                if dist < 5:
-                    return actions.FUNCTIONS.select_point("select", (scv_x[i], scv_y[i]))
-
-        # 3. 尋找正在採瓦斯的 SCV (靠近煉油廠的)
         r_y, r_x = (unit_type == REFINERY_ID).nonzero()
-        if r_x.any():
-            for i in range(len(scv_x)):
-                dist = np.min(np.sqrt((r_x - scv_x[i])**2 + (r_y - scv_y[i])**2))
-                if dist < 5:
-                    return actions.FUNCTIONS.select_point("select", (scv_x[i], scv_y[i]))
+        
+        
 
-        # 4. 最後手段：隨機選取畫面上的一個 SCV (可能是正在走路或建設中的)
-        idx = random.randint(0, len(scv_x) - 1)
-        return actions.FUNCTIONS.select_point("select", (scv_x[idx], scv_y[idx]))
+        candidates = []
+        for i in range(len(scv_x)):
+            # 條件 1: 靠近礦脈 (距離 < 10)
+            is_near_min = False
+            if m_x.any():
+                dist_m = np.min(np.sqrt((m_x - scv_x[i])**2 + (m_y - scv_y[i])**2))
+                if dist_m < 10: is_near_min = True
+            
+            # 條件 2: 必須「遠離」任何瓦斯廠 (距離 > 12)
+            # 這是防止選到已經在瓦斯廠工作的工兵的關鍵
+            is_not_gas_worker = True
+            if r_x.any():
+                dist_r = np.min(np.sqrt((r_x - scv_x[i])**2 + (r_y - scv_y[i])**2))
+                if dist_r < 12: is_not_gas_worker = False
+            
+            if is_near_min and is_not_gas_worker:
+                candidates.append((scv_x[i], scv_y[i]))
 
+        if candidates:
+            # 從礦工中隨機選一個
+            target = random.choice(candidates)
+            return actions.FUNCTIONS.select_point("select", target)
+        
+        # 如果真的沒找到純礦工，回傳 no_op 等待下一幀，不要亂抓
+        return actions.FUNCTIONS.no_op()
     def _calc_barracks_pos(self, obs):
         """ 修正版：根據指揮中心位置動態計算兵營座標，確保右側空間 """
         global BASE_LOCATION_CODE  # 宣告使用全域變數
@@ -727,7 +974,7 @@ def main(argv):
             print("--- 啟動新對局 ---")
             obs_list = env.reset()
             while True:
-                action_id = 1#random.randint(1, 41)##random.choice([1,2,3])#
+                action_id = random.choice([1,2,3,4,5,14, 30,36, 11,41,42])#1#random.randint(1, 41)##
                 param = random.randint(1, 64)#1# # 網格限制 1-16
                 
                 sc2_action = agent.get_action(obs_list[0], action_id, parameter=param)
