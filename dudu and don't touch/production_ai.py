@@ -55,29 +55,30 @@ class DataCollector:
 # =========================================================
 class ProductionAI:
     def __init__(self):
-        self.collector = DataCollector()
-        self.depots_built = 0
-        self.refinery_target = None
-        self.cc_x_screen = 42   # 預設螢幕中心點 X
-        self.cc_y_screen = 42   # 預設螢幕中心點 Y
-        self.gas_workers_assigned = 0
-        self.active_parameter = 1 # 目前選定的建築位置編號
-        self.locked_action = None # 用於處理需要多步驟完成的動作（如：選SCV -> 蓋建築）
-        self.lock_timer = 0       # 鎖定計時器，避免 AI 卡死
+        self.collector = DataCollector() #各項數據（如礦物、瓦斯、人口、執行的動作
+        self.refinery_target = None   # 用來儲存瓦斯湧泉（Geyser）的座標點
+        self.cc_x_screen = 42         # 預設螢幕中心點 X
+        self.cc_y_screen = 42         # 預設螢幕中心點 Y
+        self.gas_workers_assigned = 0 # 紀錄目前已經指派了多少工兵去採集瓦斯
+        self.active_parameter = 1     # 目前選定的建築位置編號
+        self.locked_action = None     # 用於處理需要多步驟完成的動作（如：選SCV -> 蓋建築）
+        self.lock_timer = 0           # 鎖定計時器，避免 AI 卡死
 
+    #檢查當前選取狀態中是否包含工兵。
     def _is_scv_selected(self, obs):
-        """ 檢查當前畫面是否已經選中了 SCV """
+        # 檢查單一選取：使用 len() 判斷是否有選中單位
         if len(obs.observation.single_select) > 0:
             return obs.observation.single_select[0].unit_type == SCV_ID
+            
+        # 檢查複數選取：同樣使用 len()
         if len(obs.observation.multi_select) > 0:
+            # 只要選取的清單中包含任何一個工兵，就視為已選中
             return any(u.unit_type == SCV_ID for u in obs.observation.multi_select)
+            
         return False
-
+    
+    #尋找畫面上所有指定 ID 建築的中心點。
     def _find_units_centers(self, unit_type, unit_id):
-        """ 
-        尋找畫面上所有指定 ID 建築的中心點。
-        這能確保 AI 點擊在建築物體上，而不是點到旁邊的空地 
-        """
         y, x = (unit_type == unit_id).nonzero()
         if not x.any(): return []
         
@@ -93,10 +94,10 @@ class ProductionAI:
         return centers
 
     def get_action(self, obs, action_id, parameter=None):
-        # --- 處理鎖定與超時 (建議設為 15) ---
+        # --- 處理鎖定與超時  ---
         if self.locked_action is not None:
             self.lock_timer += 1
-            if self.lock_timer > 15:
+            if self.lock_timer > 6:
                 self.locked_action = None
                 self.lock_timer = 0
             else:
@@ -109,19 +110,33 @@ class ProductionAI:
         unit_type = obs.observation.feature_screen[features.SCREEN_FEATURES.unit_type.index]
         player = obs.observation.player
         available = obs.observation.available_actions
+        # --- 基地位置環境變數定義 ---
+        # 1. 獲取小地圖上的玩家相對位置 (1 代表自己)
+        player_relative_minimap = obs.observation.feature_minimap[features.MINIMAP_FEATURES.player_relative.index]
+        y_mini, x_mini = (player_relative_minimap == 1).nonzero()
+        
+        # 2. 判斷基地在全圖的象限 (0: 左上, 1: 右下)
+        # 透過小地圖平均座標是否大於中心點 (32) 來判斷
+        if x_mini.any() and y_mini.any():
+            base_x_mini, base_y_mini = x_mini.mean(), y_mini.mean()
+            self.base_location_code = 1 if (base_x_mini > 32 and base_y_mini > 32) else 0
+        else:
+            self.base_location_code = 0 # 預設左上
+
+        # 3. 獲取指揮中心在「當前螢幕」的精確中心座標
+        cc_centers = self._find_units_centers(unit_type, COMMAND_CENTER_ID)
+        if cc_centers:
+            # 更新 AI 記憶中的主堡螢幕座標
+            self.cc_x_screen, self.cc_y_screen = cc_centers[0]
 
         # --- 🎯 自由位置坐標系 ---
-        # 為了讓 AI 能蓋出「一堵牆」，我們縮短間距並讓它有線性移動的可能
-        # 我們假設 parameter 1-16 代表畫面上的一個 4x4 區域，但縮小間距到 11 像素
-        # 11 像素大約是補給站的寬度，這樣蓋起來會「剛好黏住」
-        # --- 🎯 64 點高密度坐標系 (8x8 網格) ---
-        grid_size = 8  # 從 4 改成 8
-        p_idx = max(0, self.active_parameter - 1) % 64 # 確保不超過 63
+        grid_size = 8
+        p_idx = max(0, self.active_parameter - 1) % 64
         
         row = p_idx // grid_size
         col = p_idx % grid_size
 
-        # 間距設為 10，這樣參數 1 號跟 2 號蓋出來的補給站會剛好黏住
+        # 間距設為 10
         tx = 10 + (col * 10)
         ty = 10 + (row * 10)
 
@@ -147,7 +162,7 @@ class ProductionAI:
 
             # C. 還沒選到人
             self.locked_action = 1 
-            return self._select_scv(unit_type, available)
+            return self._select_scv_prioritized(obs, unit_type, available)
          
         # [Action 2] 建造兵營 (150 M)
         elif action_id == 2:
@@ -164,7 +179,7 @@ class ProductionAI:
                 return actions.FUNCTIONS.no_op()
 
             self.locked_action = 2
-            return self._select_scv(unit_type, available)
+            return self._select_scv_prioritized(obs, unit_type, available)
         
         elif action_id == 3:
             if player.minerals < 150 or player.vespene < 100:
@@ -178,7 +193,7 @@ class ProductionAI:
                 self.locked_action = 3
                 return actions.FUNCTIONS.no_op()
             self.locked_action = 3 # 【關鍵】
-            return self._select_scv(unit_type, available)
+            return self._select_scv_prioritized(obs, unit_type, available)
 
         # [Action 4] 建造星際港 (150 M, 100 V)
         elif action_id == 4:
@@ -193,7 +208,7 @@ class ProductionAI:
                 self.locked_action = 4
                 return actions.FUNCTIONS.no_op()
             self.locked_action = 4 # 【關鍵】
-            return self._select_scv(unit_type, available)
+            return self._select_scv_prioritized(obs, unit_type, available)
 
         # [Action 5] 建造核融合核心 (150 M, 150 V)
         elif action_id == 5:
@@ -208,7 +223,7 @@ class ProductionAI:
                 self.locked_action = 5
                 return actions.FUNCTIONS.no_op()
             self.locked_action = 5
-            return self._select_scv(unit_type, available)
+            return self._select_scv_prioritized(obs, unit_type, available)
 
         # [Action 6] 建造指揮中心 (400 M)
         elif action_id == 6:
@@ -223,7 +238,7 @@ class ProductionAI:
                 self.locked_action = 6
                 return actions.FUNCTIONS.no_op()
             self.locked_action = 6
-            return self._select_scv(unit_type, available)
+            return self._select_scv_prioritized(obs, unit_type, available)
 
         # [Action 7] 建造電機工程所 (125 M)
         elif action_id == 7:
@@ -238,7 +253,7 @@ class ProductionAI:
                 self.locked_action = 7
                 return actions.FUNCTIONS.no_op()
             self.locked_action = 7
-            return self._select_scv(unit_type, available)
+            return self._select_scv_prioritized(obs, unit_type, available)
 
         # [Action 8] 建造感應塔 (125 M, 50 V)
         elif action_id == 8:
@@ -253,7 +268,7 @@ class ProductionAI:
                 self.locked_action = 8
                 return actions.FUNCTIONS.no_op()
             self.locked_action = 8
-            return self._select_scv(unit_type, available)
+            return self._select_scv_prioritized(obs, unit_type, available)
 
         # [Action 9] 建造幽靈特務學院 (150 M, 50 V)
         elif action_id == 9:
@@ -268,7 +283,7 @@ class ProductionAI:
                 self.locked_action = 9
                 return actions.FUNCTIONS.no_op()
             self.locked_action = 9
-            return self._select_scv(unit_type, available)
+            return self._select_scv_prioritized(obs, unit_type, available)
 
         # [Action 10] 建造兵工廠 (150 M, 100 V)
         elif action_id == 10:
@@ -283,7 +298,7 @@ class ProductionAI:
                 self.locked_action = 10
                 return actions.FUNCTIONS.no_op()
             self.locked_action = 10
-            return self._select_scv(unit_type, available)
+            return self._select_scv_prioritized(obs, unit_type, available)
         
         # [Action 11] 建造瓦斯廠
         elif action_id == 11:
@@ -298,7 +313,7 @@ class ProductionAI:
                     # 這裡會回傳湧泉的中心座標 (x, y)
                     return actions.FUNCTIONS.Build_Refinery_screen("now", self.refinery_target)
             self.locked_action = 11
-            return self._select_scv(unit_type, available)
+            return self._select_scv_prioritized(obs, unit_type, available)
         
         # [Action 12] 建造飛彈砲台 (100 M)
         elif action_id == 12:
@@ -313,7 +328,7 @@ class ProductionAI:
                 self.locked_action = 12
                 return actions.FUNCTIONS.no_op()
             self.locked_action = 12
-            return self._select_scv(unit_type, available)
+            return self._select_scv_prioritized(obs, unit_type, available)
 
         # [Action 13] 建造碉堡 (100 M)
         elif action_id == 13:
@@ -328,11 +343,11 @@ class ProductionAI:
                 self.locked_action = 13
                 return actions.FUNCTIONS.no_op()
             self.locked_action = 13
-            return self._select_scv(unit_type, available)
+            return self._select_scv_prioritized(obs, unit_type, available)
         
         # --- [Action 14-32] 單位生產指令集 ---
 
-        # [Action 14] 製造 SCV (注意：此行現在應該在刪除死碼後的第 150 行左右)
+        # [Action 14] 製造 SCV 
         elif action_id == 14:
             if player.minerals >= 200 and actions.FUNCTIONS.Train_SCV_quick.id in available:
                 return actions.FUNCTIONS.Train_SCV_quick("now")
@@ -374,7 +389,7 @@ class ProductionAI:
             return self._select_unit(unit_type, BARRACKS_ID)
 
         
-        # [Action 18] 製造掠奪者 (優化版)
+        # [Action 18] 製造掠奪者 
         elif action_id == 18:
             if actions.FUNCTIONS.Train_Marauder_quick.id in available:
                 return actions.FUNCTIONS.Train_Marauder_quick("now")
@@ -614,34 +629,40 @@ class ProductionAI:
 
     # --- 修改後的選取工兵邏輯 ---
 
-    def _select_scv(self, unit_type, available):
+    def _select_scv_prioritized(self, obs, unit_type, available):
+        """ 
+        優先級選取工兵：1.空閒 2.採礦 3.採瓦斯 4.畫面上的其他SCV
+        """
+        # 1. 優先選取空閒工兵
         if actions.FUNCTIONS.select_idle_worker.id in available:
             return actions.FUNCTIONS.select_idle_worker("select")
         
-        y, x = (unit_type == SCV_ID).nonzero()
-        if x.any():
-            idx = random.randint(0, len(x) - 1)
-            return actions.FUNCTIONS.select_point("select", (x[idx], y[idx]))
-            
-        y_m, x_m = (unit_type == MINERAL_FIELD_ID).nonzero()
-        if x_m.any():
-            idx = random.randint(0, len(x_m) - 1)
-            return actions.FUNCTIONS.select_point("select", (x_m[idx], y_m[idx]))
+        # 獲取所有 SCV 的位置
+        scv_y, scv_x = (unit_type == SCV_ID).nonzero()
+        if not scv_x.any():
+            # 如果畫面上完全沒 SCV，強制視角回主基地找人
+            return actions.FUNCTIONS.move_camera((16, 16))
 
-        # 【關鍵補強】如果畫面上什麼都沒有，回傳移動相機回基地的動作
-        # 假設 0 號網格是你的基地位置
-        return actions.FUNCTIONS.move_camera((16, 16))
-    
-    def _calc_depot_pos(self):
-        """ 三角形排列座標計算 """
-        if self.depots_built == 0:
-            target = (self.cc_x_screen + 15, self.cc_y_screen + 15)
-        elif self.depots_built == 1:
-            target = (self.cc_x_screen + 27, self.cc_y_screen + 15)
-        else:
-            target = (self.cc_x_screen + 21, self.cc_y_screen + 27)
-        self.depots_built = (self.depots_built + 1) % 3
-        return (np.clip(target[0], 0, 83), np.clip(target[1], 0, 83))
+        # 2. 尋找正在採礦的 SCV (靠近晶體礦的)
+        m_y, m_x = (unit_type == MINERAL_FIELD_ID).nonzero()
+        if m_x.any():
+            for i in range(len(scv_x)):
+                # 檢查該 SCV 是否靠近任何礦脈 (距離小於 5 像素)
+                dist = np.min(np.sqrt((m_x - scv_x[i])**2 + (m_y - scv_y[i])**2))
+                if dist < 5:
+                    return actions.FUNCTIONS.select_point("select", (scv_x[i], scv_y[i]))
+
+        # 3. 尋找正在採瓦斯的 SCV (靠近煉油廠的)
+        r_y, r_x = (unit_type == REFINERY_ID).nonzero()
+        if r_x.any():
+            for i in range(len(scv_x)):
+                dist = np.min(np.sqrt((r_x - scv_x[i])**2 + (r_y - scv_y[i])**2))
+                if dist < 5:
+                    return actions.FUNCTIONS.select_point("select", (scv_x[i], scv_y[i]))
+
+        # 4. 最後手段：隨機選取畫面上的一個 SCV (可能是正在走路或建設中的)
+        idx = random.randint(0, len(scv_x) - 1)
+        return actions.FUNCTIONS.select_point("select", (scv_x[idx], scv_y[idx]))
 
     def _calc_barracks_pos(self, obs):
         """ 修正版：根據指揮中心位置動態計算兵營座標，確保右側空間 """

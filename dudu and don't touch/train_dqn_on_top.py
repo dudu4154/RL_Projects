@@ -94,7 +94,6 @@ class QNetwork(nn.Module):
         self.action_head = nn.Linear(64, action_size)
         
         # 參數頭：輸出 64 個網格位置的 Q 值
-        # 注意：名字必須與舊模型一致 (param_head)，且輸入維度應為 64
         self.param_head = nn.Linear(64, 64) 
 
     def forward(self, x):
