@@ -2,10 +2,13 @@
 全部都是終端指令
 終端依序執行下面指令進虛擬環境(每一次都要跑)
 
-cd "C:\RL_Projects"
+cd "D:\RL_Projects\SC2AIprogectpy"
+D:\RL_Projects\sc2_new_env\Scripts\activate
+cd "D:\RL_Projects\SC2AIprogectpy\my_agent"
+cd "E:\RL_Projects"
 .\sc2_new_env\Scripts\activate
-cd "C:\RL_Projects\my_agent"
-$env:SC2PATH = "D:\Game\StarCraft II"
+cd "E:\RL_Projects\my_agent"
+$env:SC2PATH = "D:\StarCraft II"
 
  #這個要看你的星海在哪裡 指到資料夾就好
 
@@ -27,3 +30,7 @@ python -m tensorboard.main --logdir=logs  #看log的指令 會是本地的網址
 python train_ppo.py ＃不用理他
 python pvt_agent_basic.py  # 執行杜明道的腳本的指令
 python pvt_agent_fight.py  # 執行楊以振的腳本的指令
+
+python SC2AIprogectpy/chx_production_AI.py # 執行莊賀翔的腳本的指令
+python chx_AI_learning.py
+python -m tensorboard.main --logdir=runs
