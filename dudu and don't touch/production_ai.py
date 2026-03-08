@@ -99,7 +99,7 @@ class ProductionAI:
         # --- 處理鎖定與超時 ---
         if self.locked_action is not None:
             self.lock_timer += 1
-            if self.lock_timer > 16:
+            if self.lock_timer > 6:
                 self.locked_target = None 
                 self.locked_action = None
                 self.lock_timer = 0

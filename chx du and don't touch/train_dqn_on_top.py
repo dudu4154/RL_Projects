@@ -229,7 +229,7 @@ def main(argv):
 
                 # Epsilon-Greedy 選擇 (a_id 決定做什麼，p_id 決定在哪做)
                 if random.random() <= epsilon:
-                    a_id = random.randint(1, 41) 
+                    a_id = random.randint(1, 42) 
                     p_id = random.randint(1, 64)
                 else:
                     with torch.no_grad():

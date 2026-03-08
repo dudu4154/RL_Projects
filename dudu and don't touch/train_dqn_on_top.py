@@ -162,10 +162,11 @@ def main(argv):
         map_name="Simple96",
         players=[sc2_env.Agent(sc2_env.Race.terran), sc2_env.Agent(sc2_env.Race.terran)],
         agent_interface_format=sc2_env.AgentInterfaceFormat(
-            feature_dimensions=sc2_env.Dimensions(screen=84, minimap=64), use_raw_units=False),
+            feature_dimensions=sc2_env.Dimensions(screen=84, minimap=64), 
+            use_raw_units=True),
         step_mul=16, realtime=False
     ) as env:
-        for ep in range(1000):
+        for ep in range(5000):
             # --- 1. 初始化環境與變數 (修復 UnboundLocalError) ---
             hands = ProductionAI() 
             obs_list = env.reset() 
