@@ -144,7 +144,7 @@ class ProductionAI:
         tx = 10 + (col * 10)
         ty = 10 + (row * 10)
 
-        grid_pos = (np.clip(tx, 0, 83), np.clip(ty, 0, 83))
+        grid_pos = (np.clip(tx, 5, 70), np.clip(ty, 5, 78))
 
        
         # [Action 1] 建造補給站 (100 M)
@@ -500,20 +500,11 @@ class ProductionAI:
 
         # [Action 23] 製造工程坦克 (Siege Tank) - 修正選取邏輯
         elif action_id == 23:
-            # 1. 資源與按鈕檢查
-            if player.minerals >= 150 and player.vespene >= 125 and actions.FUNCTIONS.Train_SiegeTank_quick.id in available:
-                return actions.FUNCTIONS.Train_SiegeTank_quick("now")
-            
-            # 2. 如果沒按鈕，我們需要選取「有科技實驗室」的軍工廠
-            # 這裡簡單化處理：先獲取實驗室的位置，並點擊它左邊一點點（通常是軍工廠主體）
-            techlab_y, techlab_x = (unit_type == 38).nonzero() # 38 是軍工廠科技實驗室的 ID
-            if techlab_x.any():
-                # 點擊實驗室中心偏左 10 像素的位置（嘗試選中本體）
-                target = (max(0, int(techlab_x.mean()) - 10), int(techlab_y.mean()))
-                return actions.FUNCTIONS.select_point("select", target)
-            
-            # 3. 如果連實驗室都沒看到，才隨機選工廠
-            return self._select_unit(unit_type, FACTORY_ID)
+        # 新增：如果已經選中「有掛件的軍工廠」，直接生產
+            if len(obs.observation.single_select) > 0:
+                if obs.observation.single_select[0].unit_type == FACTORY_ID:
+                    if actions.FUNCTIONS.Train_SiegeTank_quick.id in available:
+                        return actions.FUNCTIONS.Train_SiegeTank_quick("now")
         
         # [Action 24] 製造颶風飛彈車 (Cyclone) - 150 M, 100 V
         elif action_id == 24:
