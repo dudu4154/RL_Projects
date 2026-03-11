@@ -195,6 +195,11 @@ def main(argv):
         step_mul=16, realtime=False
     ) as env:
         for ep in range(1000):
+            CURRENT_TRAIN_TASK = random.choice(list(REWARD_CONFIG.keys()))
+            task_info = REWARD_CONFIG[CURRENT_TRAIN_TASK]
+            print(f"🚀 Episode {ep+1} | 訓練任務：{task_info['name']}")
+
+            hands = ProductionAI() 
             # --- 1. 初始化環境與變數 (修復 UnboundLocalError) ---
             hands = ProductionAI() 
             obs_list = env.reset() 
@@ -222,6 +227,7 @@ def main(argv):
             a_id = 40; p_id = 1 
 
             while True:
+                
                 # --- 1. 取得當前狀態與選擇動作 ---
                 current_block = getattr(hands, 'active_parameter', 1)
                 state = get_state_vector(obs, current_block, CURRENT_TRAIN_TASK)
@@ -237,9 +243,6 @@ def main(argv):
                         a_id = torch.argmax(q_actions).item()
                         p_id = torch.argmax(q_params).item() + 1
 
-
-                # --- 2. 執行單一動作 (移除原有的自動切換視角邏輯) ---
-                # --- 2. 執行單一動作 ---
                 # --- 2. 執行單一動作 ---
                 sc2_action = hands.get_action(obs, a_id, parameter=p_id)
                 actual_id = hands.locked_action if hands.locked_action is not None else a_id
@@ -331,18 +334,21 @@ def main(argv):
 
                 # 【修正】刪除原本代碼中重複的 total_reward += step_reward
                 total_reward += step_reward
+                u_pixels = np.sum((obs_data.feature_screen[features.SCREEN_FEATURES.unit_type.index] == task_info["id"]) & 
+                                  (obs_data.feature_screen[features.SCREEN_FEATURES.player_relative.index] == 1))
+                current_real_count = int(np.round(float(u_pixels) / task_info["pixel"]))
 
                 # --- 5. 狀態更新與存入記憶 ---
                 updated_block = getattr(hands, 'active_parameter', 1)
                 next_state = get_state_vector(next_obs, updated_block, CURRENT_TRAIN_TASK)
                 # 現在 real_m_count 已經定義，不會再報錯
-                done = bool(next_obs.last() or current_real_count >= 5 or next_obs.observation.game_loop[0] >= 20160)
-                # 確保存入記憶的是 ProductionAI 真正執行的那個動作 ID
+                done = bool(next_obs.last() or current_real_count >= 5 or obs_data.game_loop[0] >= 20160)
                 # 如果這一步因為鎖定機制執行了 Action 1，即便隨機抽到 40，也要記為 1
                 actual_action_id = hands.locked_action if hands.locked_action is not None else a_id
                 memory.append((state, int(actual_action_id), int(p_id), float(step_reward), next_state, bool(done)))
                 obs = next_obs
                 # --- 6. 模型訓練 (批次學習) ---
+                
                 # --- 6. 模型訓練 (批次學習) ---
                 train_step_counter += 1
                 if len(memory) > 1000 and train_step_counter % 8 == 0:
@@ -376,6 +382,11 @@ def main(argv):
                     optimizer.zero_grad()
                     loss.backward()
                     optimizer.step()
+                # ... (前面是存入 memory 的程式碼) ...
+
+                obs = next_obs
+                
+                # ✨ 統一合併成一個 done 判定
                 if done:
                     # 統計兵營與科技實驗室 (全域掃描)
                     final_b_pixels = np.sum((next_m_unit == production_ai.BARRACKS_ID) & (next_m_relative == 1))
@@ -384,27 +395,21 @@ def main(argv):
                     final_t_pixels = np.sum((next_m_unit == production_ai.BARRACKS_TECHLAB_ID) & (next_m_relative == 1))
                     final_t_count = 1 if final_t_pixels > 0 else 0
                     
-                    # 【核心修正】這裡傳入的參數順序必須與 log_episode 定義一致
+                    # 📝 現在這行會被成功執行了
                     logger.log_episode(
-                        ep + 1,            # Episode (第幾次)
-                        epsilon,           # Epsilon
-                        total_reward,      # 總分
-                        final_b_count,     # 兵營
-                        final_t_count,     # 科技實驗室
-                        current_real_count,      # 掠奪者 (狩獵者)
-                        next_obs.observation.game_loop[0], # Loop
-                        "Done",            # Reason
-                        (production_ai.BASE_LOCATION_CODE == 1) # Location
+                        ep + 1, epsilon, total_reward, 
+                        final_b_count, final_t_count, current_real_count, 
+                        next_obs.observation.game_loop[0], "Done", 
+                        (production_ai.BASE_LOCATION_CODE == 1)
                     )
                     
-                    # 控制台同步輸出統計內容
                     task_name = task_cfg['name'] if task_cfg else "目標單位"
                     print(f"\n" + "="*40)
-                    print(f"🏁 第 {ep+1} 次 訓練結算")
-                    print(f"🏠 兵營: {final_b_count} | 🧪 實驗室: {final_t_count} | 🎯 {task_name}產出: {current_real_count}")
+                    print(f"🏁 第 {ep+1} 次 訓練結算 | 目標：{task_name}")
+                    print(f"🏠 兵營: {final_b_count} | 🧪 實驗室: {final_t_count} | 🎯 最終產量: {current_real_count}")
                     print(f"💰 總分: {int(total_reward)}")
                     print("="*40 + "\n")
-                    break
+                    break # 這裡才執行 break 結束單局
             
             # 回合結束後更新 epsilon
             epsilon = max(learn_min, epsilon * epsilon_decay)
