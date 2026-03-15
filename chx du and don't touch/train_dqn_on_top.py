@@ -195,7 +195,7 @@ def main(argv):
         step_mul=16, realtime=False
     ) as env:
         for ep in range(1000):
-            CURRENT_TRAIN_TASK = random.choice(list(REWARD_CONFIG.keys()))
+            CURRENT_TRAIN_TASK = 16#random.choice(list(REWARD_CONFIG.keys()))
             task_info = REWARD_CONFIG[CURRENT_TRAIN_TASK]
             print(f"🚀 Episode {ep+1} | 訓練任務：{task_info['name']}")
 
