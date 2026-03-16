@@ -146,7 +146,7 @@ class QNetwork(nn.Module):
     
     
     
-def get_state_vector(obs, current_block, target_project_id):
+def get_state_vector(obs, current_block, target_project_id, last_action_id):
     player = obs.observation.player
     m_unit = obs.observation.feature_minimap.unit_type
     m_relative = obs.observation.feature_minimap.player_relative
@@ -164,7 +164,7 @@ def get_state_vector(obs, current_block, target_project_id):
     # 用「動作可用性」偵測科技室 (這不會報 AttributeError)
     can_train_marauder = 1.0 if actions.FUNCTIONS.Train_Marauder_quick.id in available else 0.0
 
-    return [
+    state_list = [
         player.food_workers / 16,
         player.minerals / 1000,
         player.vespene / 500,
@@ -183,15 +183,17 @@ def get_state_vector(obs, current_block, target_project_id):
         cam_x, 
         cam_y,
         can_train_marauder,
-        target_project_id / 40.0
+        target_project_id / 40.0,
+        last_action_id / 46.0
     ]
+    return state_list
 
 # =========================================================
 # 🎮 訓練主程式
 # =========================================================
 def main(argv):
     del argv
-    state_size = 19 
+    state_size = 20 
     action_size = 46
     train_step_counter = 0
     brain_model = QNetwork(state_size, action_size)
@@ -200,6 +202,9 @@ def main(argv):
     memory = deque(maxlen=100000) 
     logger = TrainingLogger() # 使用 TrainingLogger 紀錄產量
     learn_min = 0.01
+    last_action_id = 0   
+    current_block = 1    
+    
     
     if not os.path.exists(log_dir):
         os.makedirs(log_dir, exist_ok=True) # 確保資料夾一定存在
@@ -221,12 +226,14 @@ def main(argv):
             CURRENT_TRAIN_TASK = 18
             task_info = REWARD_CONFIG[CURRENT_TRAIN_TASK]
             print(f"🚀 Episode {ep+1} | 訓練任務：{task_info['name']}")
-
+            last_action_id = 0
             hands = ProductionAI() 
             obs_list = env.reset() 
             obs = obs_list[0]
             next_obs = obs  # ✨ 關鍵修正：初始化 next_obs 避免 UnboundLocalError
-
+            last_action_id = 0   # ✨ 初始化上一步動作
+            current_block = 1    # ✨ 初始化當前區塊
+            hands = ProductionAI()
             # 初始化追蹤變數
             
             rewarded_depots = 0     # 【新增】紀錄已給分過的補給站數量
@@ -251,21 +258,21 @@ def main(argv):
             }
 
             while True:
+                actual_id = hands.locked_action if hands.locked_action is not None else a_id
                 obs_data = next_obs.observation 
                 next_m_unit = obs_data.feature_minimap[features.MINIMAP_FEATURES.unit_type.index]
                 next_m_relative = obs_data.feature_minimap[features.MINIMAP_FEATURES.player_relative.index]
                 next_s_unit = obs_data.feature_screen[features.SCREEN_FEATURES.unit_type.index]
                 next_s_relative = obs_data.feature_screen[features.SCREEN_FEATURES.player_relative.index]
-
+                next_state = get_state_vector(next_obs, current_block, CURRENT_TRAIN_TASK, actual_id)
                 # --- 1. 取得當前狀態與選擇動作 ---
                 current_block = getattr(hands, 'active_parameter', 1)
-                state = get_state_vector(obs, current_block, CURRENT_TRAIN_TASK)
-                state_t = torch.FloatTensor(np.array(state))
                 player = obs_data.player
-                
+                state = get_state_vector(obs, current_block, CURRENT_TRAIN_TASK, last_action_id)
+                state_t = torch.FloatTensor(np.array(state))
                 # Epsilon-Greedy 選擇 (a_id 決定做什麼，p_id 決定在哪做)
                 if random.random() <= epsilon:
-                    a_id = random.randint(1, 44) 
+                    a_id = random.randint(1, 45) 
                     p_id = random.randint(1, 64)
                 else:
                     with torch.no_grad():
@@ -275,12 +282,17 @@ def main(argv):
 
                 # --- 2. 執行單一動作 ---
                 sc2_action = hands.get_action(obs, a_id, parameter=p_id)
-                actual_id = hands.locked_action if hands.locked_action is not None else a_id
-                
-                # --- 2. 執行動作與取得新觀察 ---
                 obs_list = env.step([sc2_action, actions.FUNCTIONS.no_op()])
                 next_obs = obs_list[0]
                 
+                # 確定這一步實際執行的動作 (考慮鎖定機制)
+                actual_id = hands.locked_action if hands.locked_action is not None else a_id
+                # --- 5. 狀態更新與存入記憶 ---
+                updated_block = getattr(hands, 'active_parameter', 1)
+                
+                # ✨ 修正：補上第四個參數 actual_action_id
+                actual_action_id = hands.locked_action if hands.locked_action is not None else a_id
+                next_state = get_state_vector(next_obs, updated_block, CURRENT_TRAIN_TASK, actual_action_id)
                 # --- 【關鍵修正：變數定義必須移到最前面】 ---
                 
                 # --- 3. 數據計算與紀錄 (現在變數已定義，不會報錯了) ---
@@ -294,8 +306,8 @@ def main(argv):
                     obs_data.player.food_workers, 
                     16, curr_b_count, actual_id
                 )
-
                 # --- 4. 獎勵判定與印出資訊 ---
+                
                 step_reward = -0.01 
 
                 if train_step_counter % 10 == 0:
@@ -326,6 +338,18 @@ def main(argv):
                     if player.food_cap - player.food_used > 20:
                         step_reward -= 2.0
                         print(f"🏚️ 補給過剩（{player.food_cap - player.food_used}），禁止洗分，扣 2 分")
+                # --- [新增：空閒工兵懲罰] ---
+                # 從 player 數據中直接獲取空閒工兵數量
+                idle_workers = player.idle_worker_count
+                
+                if idle_workers > 0:
+                    # 每一隻空閒工兵每步扣 0.01 分 (與時間懲罰相同強度)
+                    idle_penalty = idle_workers * 0.01
+                    step_reward -= idle_penalty
+                    
+                    # 為了方便觀察，可以每 50 步印一次警告
+                    if train_step_counter % 50 == 0:
+                        print(f"👷 警告：有 {idle_workers} 隻工兵正在發呆！扣除 {idle_penalty:.2f} 分")
                     # --- [正向里程碑獎勵系統 - 任務關聯版] ---
                 
                 task_cfg = REWARD_CONFIG.get(CURRENT_TRAIN_TASK)
@@ -409,12 +433,16 @@ def main(argv):
                 current_real_count = int(np.round(float(u_pixels) / task_info["pixel"]))
 
                 # --- 5. 狀態更新與存入記憶 ---
+                # --- 5. 狀態更新與存入記憶 ---
                 updated_block = getattr(hands, 'active_parameter', 1)
-                next_state = get_state_vector(next_obs, updated_block, CURRENT_TRAIN_TASK)
                 
+                # ✨ 核心修正：補上第 4 個參數 actual_action_id
+                # 這樣 AI 才會知道「剛才做了這個動作後，世界變成了什麼樣子」
+                actual_action_id = hands.locked_action if hands.locked_action is not None else a_id
+                next_state = get_state_vector(next_obs, updated_block, CURRENT_TRAIN_TASK, actual_action_id)
                 done = bool(next_obs.last() or obs_data.game_loop[0] >= 20160)
                 # 如果這一步因為鎖定機制執行了 Action 1，即便隨機抽到 40，也要記為 1
-                actual_action_id = hands.locked_action if hands.locked_action is not None else a_id
+                
                 memory.append((state, int(actual_action_id), int(p_id), float(step_reward), next_state, bool(done)))
                 obs = next_obs
                 # --- 6. 模型訓練 (批次學習) ---
@@ -452,9 +480,10 @@ def main(argv):
                     optimizer.zero_grad()
                     loss.backward()
                     optimizer.step()
-                # ... (前面是存入 memory 的程式碼) ...
-
-                obs = next_obs
+                
+                    last_action_id = actual_id  # ✨ 更新記憶：這一步的動作變成下一步的「上一步」
+                    current_block = updated_block # 更新目前區塊
+                    obs = next_obs
                 
                 # ✨ 統一合併成一個 done 判定
                 # ✨ 統一合併成一個 done 判定 (動態統計版)
