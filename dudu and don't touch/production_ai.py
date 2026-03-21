@@ -647,7 +647,7 @@ class ProductionAI:
 # [Action 34] 兵營升級 (優化穩定版)
         elif action_id == 34:
             # 1. 決定要升級哪一種
-            is_tech_lab = (self.active_parameter % 2 == 1)
+            is_tech_lab = 1#(self.active_parameter % 2 == 1)
             
             # 2. 獲取動作 (優先嘗試通用型，再嘗試專用型)
             if is_tech_lab:
@@ -855,8 +855,45 @@ class ProductionAI:
                     return actions.FUNCTIONS.select_point("select_all_type", centers[0])
             
             return actions.FUNCTIONS.no_op()
+        
         elif action_id ==45:
             return actions.FUNCTIONS.no_op()
+        
+        # --- [新增/修改：Action 46 自動鎖定工兵與礦脈] ---
+        elif action_id == 46:
+            # 第一步：選取空閒工兵
+            if actions.FUNCTIONS.select_idle_worker.id in obs.observation.available_actions:
+                self.locked_action = 461 
+                return actions.FUNCTIONS.select_idle_worker("select")
+            return actions.FUNCTIONS.no_op() # 沒空閒工兵就做 no_op
+
+        elif self.locked_action == 461:
+            # 第二步：自動搜尋螢幕上的礦脈並派往採礦
+            self.locked_action = None
+            
+            s_unit_type = obs.observation.feature_screen.unit_type
+            s_player_rel = obs.observation.feature_screen.player_relative
+            
+            # 定義常見礦脈 ID (341, 483 是最常見的)
+            mineral_ids = [341, 483, 342, 343, 665, 666] 
+            
+            # 尋找中立玩家 (3) 且屬於礦物類 ID 的像素
+            mask = np.isin(s_unit_type, mineral_ids) & (s_player_rel == 3)
+            y_coords, x_coords = mask.nonzero()
+            
+            if x_coords.any():
+                # 計算礦脈中心點座標並點擊
+                target_x = int(x_coords.mean())
+                target_y = int(y_coords.mean())
+                
+                if actions.FUNCTIONS.Harvest_Gather_screen.id in obs.observation.available_actions:
+                    return actions.FUNCTIONS.Harvest_Gather_screen("now", [target_x, target_y])
+            
+            return actions.FUNCTIONS.no_op()
+
+        # --- ✨ 關鍵修正：在 get_action 函式的最後一行 (不縮排在 if 內) ---
+        # 如果前面的所有 if/elif 都沒中，確保一定會回傳一個動作，防止 NoneType 報錯
+        return actions.FUNCTIONS.no_op()
         
     # --- 內部輔助函式 ---
     def _get_home_pos(self):
@@ -1006,7 +1043,7 @@ def main(argv):
             print("--- 啟動新對局 ---")
             obs_list = env.reset()
             while True:
-                action_id = random.choice([1,2,11,42,34])#1#random.randint(1, 41)##
+                action_id = random.choice([1,47])#1#random.randint(1, 41)##
                 param = random.randint(1, 64)#1# # 網格限制 1-16
                 
                 sc2_action = agent.get_action(obs_list[0], action_id, parameter=param)

@@ -1,0 +1,6 @@
+﻿Episode,Task,Epsilon,Total_Reward,Barracks,TechLabs,Marauders,End_Loop,Reason,Is_Bottom_Right
+1,掠奪者,1.000,442,1,1,0,13440,Done,False
+2,掠奪者,0.999,1290,1,1,5,11648,Done,False
+3,掠奪者,0.998,481,1,1,2,13440,Done,False
+4,掠奪者,0.997,-145,1,1,0,13440,Done,False
+5,掠奪者,0.996,-427,1,0,0,3984,Done,False

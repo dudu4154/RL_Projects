@@ -49,7 +49,7 @@ REWARD_CONFIG = {
     # [Tier 1] 兵營系列
     16: {"name": "陸戰隊", "id": 48, "first": 100.0, "repeat": 30.0, "pixel": 10.0, "req": ['depot', 'barracks']},
     17: {"name": "死神",       "id": 49,  "first": 200.0,  "repeat": 50.0,  "pixel": 15.0,"req": ['depot', 'barracks']},
-    18: {"name": "掠奪者", "id": 51, "first": 500.0, "repeat": 150.0, "pixel": 22.0, "req": ['depot', 'barracks', 'refinery', 'techlab']}, # ✨ 你要求的掠奪者設定
+    18: {"name": "掠奪者", "id": 51, "first": 500.0, "repeat": 150.0, "pixel": 12.0, "req": ['depot', 'barracks', 'refinery', 'techlab']}, # ✨ 下調 pixel 從 22.0 -> 12.0
     19: {"name": "幽靈特務",   "id": 50,  "first": 800.0,  "repeat": 200.0, "pixel": 15.0,"req": ['depot', 'barracks', 'refinery', 'techlab']}, # 需幽靈學院
     
     # [Tier 2] 軍工廠 (Factory)
@@ -184,7 +184,7 @@ def get_state_vector(obs, current_block, target_project_id, last_action_id):
         cam_y,
         can_train_marauder,
         target_project_id / 40.0,
-        last_action_id / 46.0
+        last_action_id / 48.0
     ]
     return state_list
 
@@ -194,7 +194,7 @@ def get_state_vector(obs, current_block, target_project_id, last_action_id):
 def main(argv):
     del argv
     state_size = 20 
-    action_size = 46
+    action_size = 48
     train_step_counter = 0
     brain_model = QNetwork(state_size, action_size)
     optimizer = optim.Adam(brain_model.parameters(), lr=0.0005) 
@@ -272,7 +272,7 @@ def main(argv):
                 state_t = torch.FloatTensor(np.array(state))
                 # Epsilon-Greedy 選擇 (a_id 決定做什麼，p_id 決定在哪做)
                 if random.random() <= epsilon:
-                    a_id = random.randint(1, 45) 
+                    a_id = random.choice([1,2,11,14,16,18,34,41,42,47])#random.randint(1, 45) 
                     p_id = random.randint(1, 64)
                 else:
                     with torch.no_grad():
@@ -336,8 +336,8 @@ def main(argv):
                 # 2. 補給站限建令 (修正 NameError: a_id)
                 if a_id == 1: 
                     if player.food_cap - player.food_used > 20:
-                        step_reward -= 2.0
-                        print(f"🏚️ 補給過剩（{player.food_cap - player.food_used}），禁止洗分，扣 2 分")
+                        step_reward -= 10.0
+                        print(f"🏚️ 補給過剩（{player.food_cap - player.food_used}），禁止洗分，扣 5 分")
                 # --- [新增：空閒工兵懲罰] ---
                 # 從 player 數據中直接獲取空閒工兵數量
                 idle_workers = player.idle_worker_count
@@ -360,9 +360,9 @@ def main(argv):
                 m_relative = obs_data.feature_minimap.player_relative
                 cc_exists = np.any((m_unit == production_ai.COMMAND_CENTER_ID) & (m_relative == 1))
                 if obs_data.game_loop[0] > 500 and not cc_exists and not milestones['cc_destroyed']:
-                    step_reward -= 100
+                    step_reward -= 500
                     milestones['cc_destroyed'] = True
-                    print("💥 【警告】主堡被拆除！嚴重懲罰 -100")
+                    print("💥 【警告】主堡被拆除！嚴重懲罰 -500")
                 # A. 補給站里程碑 (只有在 req 包含 depot 時才給分)
                 if 'depot' in allowed_tech:
                     if obs_data.player.food_cap > 15 and not milestones['depot']:
@@ -373,7 +373,7 @@ def main(argv):
                 tech_buildings = [
                     (production_ai.BARRACKS_ID, 'barracks', 100.0, "兵營"),
                     (production_ai.REFINERY_ID, 'refinery', 50.0, "瓦斯廠"),
-                    (production_ai.BARRACKS_TECHLAB_ID, 'techlab', 500.0, "科技室"),
+                    (production_ai.BARRACKS_TECHLAB_ID, 'techlab', 300.0, "科技室"),
                     (27, 'factory', 300.0, "軍工廠"),
                     (28, 'starport', 400.0, "星際港"),
                     (29, 'armory', 250.0, "兵工廠"),
@@ -411,20 +411,9 @@ def main(argv):
                             step_reward += gain
                             last_target_count = current_real_count # 更新歷史最高數量
                             print(f"📈 產量增加！目前共 {current_real_count} 隻，追加獎勵 +{gain}")
-                # 3. 發呆計時器 (視角耐心)
-                    is_base_on_screen = np.any((next_s_unit == 18) | (next_s_unit == 21))
-                    if not is_base_on_screen and player.minerals > 500:
-                        off_screen_steps += 1
-                    else:
-                        off_screen_steps = 0
-                    if off_screen_steps > 100:
-                        step_reward -= 0.05
-                    if train_step_counter % 20 == 0:
-                        print(f"⌛ 警告：已經連續 {off_screen_steps} 步沒看基地且積壓資源！加重扣分")
-
-                # 💰 累積總分 (整段迴圈只留這一個累加！)
-                total_reward += step_reward
-                done = bool(next_obs.last() or obs_data.game_loop[0] >= 20160)
+                
+                is_base_on_screen = np.any((next_s_unit == 18) | (next_s_unit == 21))
+                
 
                 # --- [D. 狀態與回合結束判定] ---
                 # ✨ 確保 done 條件只有「遊戲結束」或「時間到」，不再限制數量
@@ -440,7 +429,7 @@ def main(argv):
                 # 這樣 AI 才會知道「剛才做了這個動作後，世界變成了什麼樣子」
                 actual_action_id = hands.locked_action if hands.locked_action is not None else a_id
                 next_state = get_state_vector(next_obs, updated_block, CURRENT_TRAIN_TASK, actual_action_id)
-                done = bool(next_obs.last() or obs_data.game_loop[0] >= 20160)
+                done = bool(next_obs.last() or obs_data.game_loop[0] >= 13440 or current_real_count >= 5)
                 # 如果這一步因為鎖定機制執行了 Action 1，即便隨機抽到 40，也要記為 1
                 
                 memory.append((state, int(actual_action_id), int(p_id), float(step_reward), next_state, bool(done)))
