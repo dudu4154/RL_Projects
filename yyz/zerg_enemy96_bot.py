@@ -1,198 +1,235 @@
-# zerg_enemy96_bot.py
+from sc2.bot_ai import BotAI
+from sc2.data import Race, Difficulty
+from sc2.ids.unit_typeid import UnitTypeId
+from sc2.main import run_game
+from sc2.player import Bot, Computer
+from sc2 import maps
 
-from pysc2.agents import base_agent
-from pysc2.lib import actions, units
 
-FUNCTIONS = actions.FUNCTIONS
+class ZergEnemy96Bot(BotAI):
+    async def on_start(self):
+        print("ZergEnemy96Bot 啟動成功")
+
+    async def on_step(self, iteration: int):
+        await self.distribute_workers()
+
+        if not self.townhalls:
+            return
+
+        await self.build_overlords()
+        await self.build_drones()
+        await self.build_spawning_pool()
+        await self.build_extractor()
+        await self.build_roach_warren()
+        await self.expand_if_needed()
+        await self.train_zerglings()
+        await self.train_roaches()
+        await self.defend_near_base()
+        await self.attack_logic()
+
+    async def build_overlords(self):
+        if self.supply_cap >= 200:
+            return
+
+        overlord_pending = self.already_pending(UnitTypeId.OVERLORD)
+
+        # 更早補王蟲，避免卡人口
+        if self.supply_left <= 4 and overlord_pending == 0:
+            if self.can_afford(UnitTypeId.OVERLORD) and self.larva:
+                self.larva.first.train(UnitTypeId.OVERLORD)
+
+    async def build_drones(self):
+        if not self.larva:
+            return
+
+        drone_target = 28
+        if self.townhalls.amount >= 2:
+            drone_target = 40
+
+        # 快卡人口時先不要硬補工蜂
+        if self.workers.amount < drone_target:
+            if self.can_afford(UnitTypeId.DRONE) and self.supply_left > 0:
+                self.larva.first.train(UnitTypeId.DRONE)
+
+    async def build_spawning_pool(self):
+        if self.structures(UnitTypeId.SPAWNINGPOOL).exists:
+            return
+        if self.already_pending(UnitTypeId.SPAWNINGPOOL) > 0:
+            return
+        if self.workers.amount < 13:
+            return
+        if not self.can_afford(UnitTypeId.SPAWNINGPOOL):
+            return
+        if not self.townhalls.ready:
+            return
+
+        hatch = self.townhalls.ready.first
+        await self.build(
+            UnitTypeId.SPAWNINGPOOL,
+            near=hatch.position.towards(self.game_info.map_center, 6)
+        )
+
+    async def build_extractor(self):
+        if not self.townhalls.ready:
+            return
+
+        if not self.structures(UnitTypeId.SPAWNINGPOOL).exists and self.already_pending(UnitTypeId.SPAWNINGPOOL) == 0:
+            return
+
+        max_extractors = 1
+        if self.townhalls.amount >= 2:
+            max_extractors = 2
+
+        current_extractors = self.gas_buildings.amount + self.already_pending(UnitTypeId.EXTRACTOR)
+        if current_extractors >= max_extractors:
+            return
+
+        for hatch in self.townhalls.ready:
+            geysers = self.vespene_geyser.closer_than(10, hatch)
+            for geyser in geysers:
+                if not self.can_afford(UnitTypeId.EXTRACTOR):
+                    return
+
+                if self.gas_buildings.closer_than(1.0, geyser).exists:
+                    continue
+
+                worker = self.select_build_worker(geyser.position)
+                if worker:
+                    worker.build(UnitTypeId.EXTRACTOR, geyser)
+                    return
+
+    async def build_roach_warren(self):
+        if not self.structures(UnitTypeId.SPAWNINGPOOL).ready.exists:
+            return
+        if self.structures(UnitTypeId.ROACHWARREN).exists:
+            return
+        if self.already_pending(UnitTypeId.ROACHWARREN) > 0:
+            return
+        if not self.can_afford(UnitTypeId.ROACHWARREN):
+            return
+        if not self.townhalls.ready:
+            return
+
+        hatch = self.townhalls.ready.first
+        await self.build(
+            UnitTypeId.ROACHWARREN,
+            near=hatch.position.towards(self.game_info.map_center, 8)
+        )
+
+    async def expand_if_needed(self):
+        if self.townhalls.amount >= 2:
+            return
+        if self.already_pending(UnitTypeId.HATCHERY):
+            return
+        if self.workers.amount < 24:
+            return
+        if not self.can_afford(UnitTypeId.HATCHERY):
+            return
+
+        await self.expand_now()
+
+    async def train_zerglings(self):
+        if not self.structures(UnitTypeId.SPAWNINGPOOL).ready.exists:
+            return
+        if not self.larva:
+            return
+
+        zergling_target = 12
+        if self.structures(UnitTypeId.ROACHWARREN).ready.exists:
+            zergling_target = 16
+
+        if self.units(UnitTypeId.ZERGLING).amount < zergling_target:
+            if self.can_afford(UnitTypeId.ZERGLING) and self.supply_left >= 1:
+                self.larva.first.train(UnitTypeId.ZERGLING)
+
+    async def train_roaches(self):
+        if not self.structures(UnitTypeId.ROACHWARREN).ready.exists:
+            return
+        if not self.larva:
+            return
+
+        roach_target = 18
+        if self.townhalls.amount >= 2:
+            roach_target = 30
+
+        if self.units(UnitTypeId.ROACH).amount < roach_target:
+            if self.can_afford(UnitTypeId.ROACH) and self.supply_left >= 2:
+                self.larva.first.train(UnitTypeId.ROACH)
+
+    async def defend_near_base(self):
+        army = self.units(UnitTypeId.ZERGLING) | self.units(UnitTypeId.ROACH)
+        if not army:
+            return
+
+        for hatch in self.townhalls.ready:
+            enemies = self.enemy_units.closer_than(20, hatch)
+            if enemies:
+                target = enemies.closest_to(hatch)
+                for unit in army.idle:
+                    unit.attack(target)
+                return
+
+    async def attack_logic(self):
+        army = self.units(UnitTypeId.ZERGLING) | self.units(UnitTypeId.ROACH)
+        if not army:
+            return
+
+        should_attack = (
+            self.units(UnitTypeId.ZERGLING).amount >= 12
+            or self.units(UnitTypeId.ROACH).amount >= 6
+            or army.amount >= 12
+        )
+
+        if not should_attack:
+            return
+
+        if self.enemy_units:
+            target = self.enemy_units.closest_to(army.center)
+            for unit in army.idle:
+                unit.attack(target)
+            return
+
+        if self.enemy_structures:
+            target = self.enemy_structures.closest_to(army.center)
+            for unit in army.idle:
+                unit.attack(target)
+            return
+
+        enemy_start = self.enemy_start_locations[0]
+        for unit in army.idle:
+            unit.attack(enemy_start)
 
 
-class ZergEnemy96Bot(base_agent.BaseAgent):
-    def __init__(self):
-        super().__init__()
-        self.stage = 0
-        self.attack_launched = False
-        self.base_top_left = None
+def get_working_map():
+    candidate_maps = [
+        "Simple64_v96",
+        "Simple96",
+        "AbyssalReefLE",
+        "AbyssalReef",
+        "Simple64",
+    ]
 
-    def step(self, obs):
-        super().step(obs)
+    for map_name in candidate_maps:
+        try:
+            selected_map = maps.get(map_name)
+            print(f"使用地圖: {map_name}")
+            return selected_map
+        except Exception:
+            pass
 
-        if self.base_top_left is None:
-            self.base_top_left = self.get_base_top_left(obs)
+    raise RuntimeError(
+        "找不到可用地圖。請先確認你的 StarCraft II Maps 資料夾內有 Simple64_v96 或其他可用地圖。"
+    )
 
-        # 自動補人口
-        if self.supply_left(obs) <= 1 and self.can_do(obs, "Train_Overlord_quick"):
-            return FUNCTIONS.Train_Overlord_quick("now")
 
-        # ===== Build Order =====
-        # 13 王蟲
-        if self.stage == 0:
-            if self.food(obs) >= 13 and self.can_do(obs, "Train_Overlord_quick"):
-                self.stage = 1
-                return FUNCTIONS.Train_Overlord_quick("now")
+if __name__ == "__main__":
+    selected_map = get_working_map()
 
-        # 16 二礦
-        elif self.stage == 1:
-            if self.food(obs) >= 16 and self.can_do(obs, "Build_Hatchery_screen"):
-                self.stage = 2
-                return FUNCTIONS.Build_Hatchery_screen("now", self.natural())
-
-        # 17 狗池
-        elif self.stage == 2:
-            if self.food(obs) >= 17 and self.can_do(obs, "Build_SpawningPool_screen"):
-                self.stage = 3
-                return FUNCTIONS.Build_SpawningPool_screen("now", self.pool_pos())
-
-        # 18 瓦斯
-        elif self.stage == 3:
-            if self.food(obs) >= 18:
-                gas_action = self.build_gas(obs)
-                if gas_action is not None:
-                    self.stage = 4
-                    return gas_action
-
-        # 19 王蟲
-        elif self.stage == 4:
-            if self.food(obs) >= 19 and self.can_do(obs, "Train_Overlord_quick"):
-                self.stage = 5
-                return FUNCTIONS.Train_Overlord_quick("now")
-
-        # 2:00 Queen
-        elif self.stage == 5:
-            if self.time(obs) >= 120 and self.can_do(obs, "Train_Queen_quick"):
-                self.stage = 6
-                return FUNCTIONS.Train_Queen_quick("now")
-
-        # 23 小狗
-        elif self.stage == 6:
-            if self.food(obs) >= 23 and self.can_do(obs, "Train_Zergling_quick"):
-                self.stage = 7
-                return FUNCTIONS.Train_Zergling_quick("now")
-
-        # 29 王蟲
-        elif self.stage == 7:
-            if self.food(obs) >= 29 and self.can_do(obs, "Train_Overlord_quick"):
-                self.stage = 8
-                return FUNCTIONS.Train_Overlord_quick("now")
-
-        # 30 二本
-        elif self.stage == 8:
-            if self.food(obs) >= 30 and self.can_do(obs, "Morph_Lair_quick"):
-                self.stage = 9
-                return FUNCTIONS.Morph_Lair_quick("now")
-
-        # 35 蟑螂場
-        elif self.stage == 9:
-            if self.food(obs) >= 35 and self.can_do(obs, "Build_RoachWarren_screen"):
-                self.stage = 10
-                return FUNCTIONS.Build_RoachWarren_screen("now", self.roach_warren_pos())
-
-        # 40 王蟲
-        elif self.stage == 10:
-            if self.food(obs) >= 40 and self.can_do(obs, "Train_Overlord_quick"):
-                self.stage = 11
-                return FUNCTIONS.Train_Overlord_quick("now")
-
-        # 44 蟑螂速度
-        elif self.stage == 11:
-            if self.food(obs) >= 44 and self.can_do(obs, "Research_GlialReconstitution_quick"):
-                self.stage = 12
-                return FUNCTIONS.Research_GlialReconstitution_quick("now")
-
-        # 48 蟑螂
-        elif self.stage == 12:
-            if self.food(obs) >= 48 and self.can_do(obs, "Train_Roach_quick"):
-                self.stage = 13
-                return FUNCTIONS.Train_Roach_quick("now")
-
-        # 4:50 出門
-        elif self.stage == 13:
-            if self.time(obs) >= 290 and not self.attack_launched and self.can_do(obs, "Attack_minimap"):
-                self.attack_launched = True
-                return self.attack()
-
-            # 出門後繼續補兵
-            if self.can_do(obs, "Train_Roach_quick"):
-                return FUNCTIONS.Train_Roach_quick("now")
-            elif self.can_do(obs, "Train_Zergling_quick"):
-                return FUNCTIONS.Train_Zergling_quick("now")
-
-        return FUNCTIONS.no_op()
-
-    # =========================
-    # 基本資訊
-    # =========================
-    def food(self, obs):
-        return obs.observation.player.food_used
-
-    def supply_left(self, obs):
-        p = obs.observation.player
-        return p.food_cap - p.food_used
-
-    def time(self, obs):
-        return obs.observation.game_loop[0] / 22.4
-
-    # =========================
-    # feature_units
-    # =========================
-    def get_units(self, obs):
-        if hasattr(obs.observation, "feature_units"):
-            return obs.observation.feature_units
-        return []
-
-    def get_units_by_type(self, obs, unit_type):
-        return [u for u in self.get_units(obs) if u.unit_type == unit_type]
-
-    def get_base_top_left(self, obs):
-        hatch = self.get_units_by_type(obs, units.Zerg.Hatchery)
-        if not hatch:
-            return True
-        return hatch[0].x < 48
-
-    # =========================
-    # action 可用性
-    # =========================
-    def can_do(self, obs, action_name):
-        action_id = getattr(FUNCTIONS, action_name).id
-        return action_id in obs.observation.available_actions
-
-    # =========================
-    # 96x96 座標
-    # =========================
-    def mirror_pos(self, x, y):
-        if self.base_top_left:
-            return (x, y)
-        return (96 - x, 96 - y)
-
-    def pool_pos(self):
-        return self.mirror_pos(22, 22)
-
-    def roach_warren_pos(self):
-        return self.mirror_pos(28, 22)
-
-    def natural(self):
-        return (24, 36) if self.base_top_left else (72, 60)
-
-    def attack(self):
-        target = (80, 80) if self.base_top_left else (15, 15)
-        return FUNCTIONS.Attack_minimap("now", target)
-
-    # =========================
-    # 建氣礦
-    # =========================
-    def build_gas(self, obs):
-        if not self.can_do(obs, "Build_Extractor_screen"):
-            return None
-
-        geysers = [
-            u for u in self.get_units(obs)
-            if u.unit_type in (
-                units.Neutral.VespeneGeyser,
-                units.Neutral.RichVespeneGeyser
-            )
-        ]
-
-        if geysers:
-            g = geysers[0]
-            return FUNCTIONS.Build_Extractor_screen("now", (int(g.x), int(g.y)))
-
-        return None
+    run_game(
+        selected_map,
+        [
+            Bot(Race.Zerg, ZergEnemy96Bot()),
+            Computer(Race.Terran, Difficulty.Medium),
+        ],
+        realtime=False,
+    )
