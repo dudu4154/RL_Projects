@@ -10,4 +10,4 @@ deactivate #退出環境
 
 檔名叫啥就跑啥
 
-python "C:\RL_Projects\CYJ_and_don't_touch\my_agent\MoveToBeacon.py"
+python TvZ_Simple96.py
