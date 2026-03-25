@@ -1,6 +1,6 @@
 from absl import app
 from pysc2.env import sc2_env, run_loop
-from pysc2.lib import features
+from pysc2.lib import features, actions
 
 from zerg_enemy96_bot import ZergEnemy96Bot
 from dummy_bot import DummyBot
@@ -19,6 +19,8 @@ def main(argv):
         agent_interface_format=features.AgentInterfaceFormat(
             feature_dimensions=features.Dimensions(screen=96, minimap=96),
             use_feature_units=True,
+            use_raw_units=True,
+            action_space=actions.ActionSpace.RAW,
         ),
         step_mul=8,
         visualize=True,
