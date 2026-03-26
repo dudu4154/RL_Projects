@@ -289,7 +289,7 @@ def main(argv):
             
             episode_memory = []  
             # ✨ 1. N-Step 新增：準備一個長度為 3 的滑動視窗
-            n_step_buffer = deque(maxlen=6) 
+            n_step_buffer = deque(maxlen=7) 
             total_reward = 0
             episode_memory = []
             current_block = 1       # 目前地圖區塊
@@ -347,11 +347,19 @@ def main(argv):
                 # 👇 加入科技實驗室的真實數量計算
                 techlab_pixels = np.sum((s_unit == 37) & (s_player == 1))
                 current_techlabs = int(np.round(techlab_pixels / 85.0)) # 真實科技室數
+                # 👇 新增：計算補給站數量 (防呆用)
+                depot_pixels = np.sum((s_unit == 19) & (s_player == 1))
+                current_depots = int(np.round(depot_pixels / 69.0))
+                
                 # ==========================================
                 # ✨ 升級版：科技樹動態動作遮罩 (Tech-Tree Masking)
                 # ==========================================
                 allowed_actions = [1, 2, 11, 14, 16, 18, 34, 41, 42, 44, 45]
-                
+
+                # B. 補給站防呆：人口足夠時，或已經有 3 座補給站，絕對不准再蓋 (Action 1)
+                supply_surplus = float(player.food_cap) - float(player.food_used)
+                if (supply_surplus >= 16 or current_depots >= 3) and 1 in allowed_actions:
+                    allowed_actions.remove(1)
                 # A. 工兵數量鎖定：一個基地最多只要 22 隻工兵，超過絕對不准再造 (Action 14)
                 if float(player.food_workers) >= 22 and 14 in allowed_actions:
                     allowed_actions.remove(14)
@@ -386,6 +394,47 @@ def main(argv):
                 # G. 【關鍵】採瓦斯防呆：如果沒有瓦斯廠，絕對不准派工兵去採瓦斯 (Action 42)
                 if current_refineries == 0:
                     if 42 in allowed_actions: allowed_actions.remove(42)
+
+                # ==========================================
+                # H. ✨ 終極 UI 反灰機制 (沒有資源/目標，按鈕絕對不亮)
+                # ==========================================
+                # 1. 沒建築/沒對象 絕對不准選
+                if current_barracks == 0:
+                    if 44 in allowed_actions: allowed_actions.remove(44) # 沒兵營不准選兵營
+                    
+                if player.idle_worker_count == 0:
+                    if 41 in allowed_actions: allowed_actions.remove(41) # 沒閒置工兵不准選閒置工兵
+                
+                # 2. 資源與人口不足鎖定 (沒錢沒人口就不准造)
+                minerals = float(player.minerals)
+                vespene = float(player.vespene)
+                supply_left = float(player.food_cap) - float(player.food_used)
+
+                # --- 人口不足防呆 ---
+                if supply_left < 1:
+                    for act in [14, 16]: # SCV, 陸戰隊 (需 1 人口)
+                        if act in allowed_actions: allowed_actions.remove(act)
+                if supply_left < 2:
+                    if 18 in allowed_actions: allowed_actions.remove(18) # 掠奪者 (需 2 人口)
+
+                # --- 晶礦不足防呆 ---
+                if minerals < 50:
+                    for act in [14, 16, 34]: # SCV, 陸戰隊, 科技室
+                        if act in allowed_actions: allowed_actions.remove(act)
+                if minerals < 75:
+                    if 11 in allowed_actions: allowed_actions.remove(11) # 瓦斯廠
+                if minerals < 100:
+                    for act in [1, 18]: # 補給站, 掠奪者
+                        if act in allowed_actions: allowed_actions.remove(act)
+                if minerals < 150:
+                    if 2 in allowed_actions: allowed_actions.remove(2)   # 兵營
+
+                # --- 瓦斯不足防呆 ---
+                if vespene < 25:
+                    if 18 in allowed_actions: allowed_actions.remove(18) # 掠奪者 (需 25 瓦斯)
+                if vespene < 50:
+                    if 34 in allowed_actions: allowed_actions.remove(34) # 科技室 (需 50 瓦斯)
+                # ==========================================
 
                 # H. 資源不足鎖定：沒錢就不要想著蓋兵營 (需要 150 礦)
                 if float(player.minerals) < 150 and 2 in allowed_actions:
@@ -513,14 +562,21 @@ def main(argv):
                     step_reward += 300.0
                     achieved_milestones.add("techlab")
 
-                # 5. ⚔️ 漸進式產量獎勵
-                # (請確保迴圈外有宣告 last_marine_count = 0, last_target_count = 0)
+                # 5. ⚔️ 漸進式產量獎勵 (限制陸戰隊獎勵次數，避免刷分)
                 if marine_count > getattr(agent, 'last_marine_count', 0):
-                    step_reward += 50.0  # 造出陸戰隊給小獎
                     agent.last_marine_count = marine_count
                     
+                    # ✨ 修正：最多只允許 5 隻防守，而且分數降為 10 分！
+                    if marine_count <= 10:  
+                        step_reward += 10.0  
+                        print(f"🔫 產出陸戰隊作防守！目前數量: {marine_count}")
+                    else:
+                        step_reward -= 50.0  # 嚴懲超量暴兵！
+                        print("⚡ 警告：浪費資源造太多陸戰隊！扣 50 分")
+                    
                 if current_real_count > getattr(agent, 'last_target_count', 0):
-                    step_reward += 500.0 # 造出掠奪者給大獎
+                    # ✨ 修正：把掠奪者的大獎翻倍成 1000 分，製造巨大吸引力！
+                    step_reward += 1000.0 
                     agent.last_target_count = current_real_count
                     print(f"🎯 產出掠奪者！目前數量: {current_real_count}")
 
