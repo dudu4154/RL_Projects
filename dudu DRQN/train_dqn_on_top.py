@@ -149,30 +149,30 @@ def get_state_vector(obs, current_block, target_project_id, last_action_id, last
     is_scv_selected = 1.0 if any(u.unit_type == 45 for u in obs.observation.multi_select) else 0.0
     is_cc_selected = 1.0 if (len(obs.observation.single_select) > 0 and 
                              obs.observation.single_select[0].unit_type == 18) else 0.0
-
+    is_barracks_selected = 1.0 if (len(obs.observation.single_select) > 0 and 
+                                   obs.observation.single_select[0].unit_type == 21) else 0.0
     # 計算單位數量 (從迷霧/小地圖計算)
     def count_unit(unit_id):
         return np.sum((m_unit == unit_id) & (m_relative == 1))
 
-# 建立 15 維特徵向量
-    # 建立 15 維特徵向量
     state_list = [
-        min(float(player.food_workers) / 50.0, 1.0),   # 1. 工兵數量 (最高算到 50 隻)
-        min(float(player.minerals) / 2000.0, 1.0),     # 2. 晶礦儲量 (大於 2000 一律算 1.0)
+        min(float(player.food_workers) / 50.0, 1.0),   # 1. 工兵數量
+        min(float(player.minerals) / 2000.0, 1.0),     # 2. 晶礦儲量 
         min(float(player.vespene) / 1000.0, 1.0),      # 3. 瓦斯儲量
         min(float(player.food_used) / 200.0, 1.0),     # 4. 目前人口
         min(float(count_unit(19)) / 10.0, 1.0),        # 5. 補給站數量
         min(float(count_unit(20)) / 2.0, 1.0),         # 6. 瓦斯廠數量
         min(float(count_unit(21)) / 5.0, 1.0),         # 7. 軍營數量
-        min(float(count_unit(37)) / 5.0, 1.0),         # 8. 科技實驗室
+        min(float(count_unit(37)) / 5.0, 1.0),         # 8. 科技室數量
         min(float(is_scv_selected), 1.0),              # 9. 選中工兵
-        min(float(is_cc_selected), 1.0),               # 10. 選中主堡 (順序調換以維持一致性)
-        min(float(count_unit(48)) / 50.0, 1.0),        # 11. 陸戰隊數量
-        min(float(count_unit(51)) / 30.0, 1.0),        # 12. 掠奪者數量
-        min(float(target_project_id) / 40.0, 1.0),     # 13. 任務 ID
-        min(float(current_block) / 64.0, 1.0),         # 14. 目前視角區塊
-        min(float(last_action_success), 1.0),           # 15. 上一個動作是
-        min(float(current_loop) / 13440.0, 1.0)        # ✨ 16. 遊戲時間進度 (0.0 = 開局, 1.0 = 時間到)否成功
+        min(float(is_cc_selected), 1.0),               # 10. 選中主堡
+        min(float(is_barracks_selected), 1.0),         # ✨ 11. 新增：選中兵營
+        min(float(count_unit(48)) / 50.0, 1.0),        # 12. 陸戰隊數量
+        min(float(count_unit(51)) / 30.0, 1.0),        # 13. 掠奪者數量
+        min(float(target_project_id) / 40.0, 1.0),     # 14. 任務 ID
+        min(float(current_block) / 64.0, 1.0),         # 15. 目前視角區塊
+        min(float(last_action_success), 1.0),          # 16. 上一個動作成功與否
+        min(float(current_loop) / 13440.0, 1.0)        # 17. 遊戲時間進度
     ]
     return state_list
 
@@ -183,7 +183,7 @@ def get_state_vector(obs, current_block, target_project_id, last_action_id, last
 # =========================================================
 def main(argv):
     del argv
-    state_size = 16
+    state_size = 17  
     VALID_ACTIONS = [1, 2, 11, 14, 16, 18, 34, 41, 42, 44, 45]
     action_size = len(VALID_ACTIONS)
     batch_size = 64  # ✨ 新增：每次訓練抓取的樣本數
@@ -431,9 +431,17 @@ def main(argv):
 
                 # --- 瓦斯不足防呆 ---
                 if vespene < 25:
-                    if 18 in allowed_actions: allowed_actions.remove(18) # 掠奪者 (需 25 瓦斯)
+                    if 18 in allowed_actions: allowed_actions.remove(18) 
                 if vespene < 50:
-                    if 34 in allowed_actions: allowed_actions.remove(34) # 科技室 (需 50 瓦斯)
+                    if 34 in allowed_actions: allowed_actions.remove(34) 
+                    
+                # ==========================================
+                # ✨ 3. 選擇狀態防呆 (最核心的解藥)
+                # ==========================================
+                # 如果眼睛看到「沒有選中兵營」，那就絕對不准點擊造兵按鈕！
+                if state[10] == 0.0:  # state[10] 就是我們剛剛新增的 is_barracks_selected
+                    for act in [16, 18, 34]: # 陸戰隊, 掠奪者, 科技室
+                        if act in allowed_actions: allowed_actions.remove(act)
                 # ==========================================
 
                 # H. 資源不足鎖定：沒錢就不要想著蓋兵營 (需要 150 礦)
