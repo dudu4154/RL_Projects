@@ -144,8 +144,6 @@ def get_state_vector(obs, current_block, target_project_id, last_action_id, last
     player = obs.observation.player
     m_unit = obs.observation.feature_minimap.unit_type
     m_relative = obs.observation.feature_minimap.player_relative
-    float(player.minerals) / 2000.0,  # 晶礦儲量
-    # 判斷選中狀態
     is_scv_selected = 1.0 if any(u.unit_type == 45 for u in obs.observation.multi_select) else 0.0
     is_cc_selected = 1.0 if (len(obs.observation.single_select) > 0 and 
                              obs.observation.single_select[0].unit_type == 18) else 0.0
@@ -192,8 +190,12 @@ def main(argv):
     brain_model = QNetwork(state_size, action_size).to(device)
     optimizer = optim.Adam(brain_model.parameters(), lr=0.0005)
     criterion = nn.MSELoss()
-    memory = deque(maxlen=100000)
-    success_memory = deque(maxlen=20000)
+    # 一般記憶：維持 deque，只記住最近 300 局的真實血淚史
+    memory = deque(maxlen=500) 
+
+    # 菁英記憶：改成 List，用來做排行榜
+    success_memory = [] 
+    MAX_ELITE_MEMORY = 300 # 設定排行榜最多收錄 1000 局
 
     gamma = 0.99
     logger = TrainingLogger() # 使用 TrainingLogger 紀錄產量
@@ -219,59 +221,152 @@ def main(argv):
         target_model.load_state_dict(brain_model.state_dict())
         print("✅ 載入成功！接續之前的記憶繼續訓練...")
 
-    epsilon = 1.00; epsilon_decay = 0.995; gamma = 0.99 
+    epsilon = 1.00; epsilon_decay = 0.998; gamma = 0.99 
+
+    def get_action_mask(target_obs):
+        """ 根據當前畫面狀態，回傳合法的 Action 索引列表 """
+        player = target_obs.observation.player
+        s_unit = target_obs.observation.feature_screen.unit_type
+        s_player = target_obs.observation.feature_screen.player_relative
+        
+        barracks = int(np.round(np.sum((s_unit == 21) & (s_player == 1)) / 137.0))
+        refineries = int(np.round(np.sum((s_unit == 20) & (s_player == 1)) / 97.0))
+        techlabs = int(np.round(np.sum((s_unit == 37) & (s_player == 1)) / 85.0))
+        depots = int(np.round(np.sum((s_unit == 19) & (s_player == 1)) / 69.0))
+        
+        # 👉 修正 1：移除 44 (發呆)，不准 AI 躺平
+        allowed_acts = [1, 2, 11, 14, 16, 18, 34, 41, 42, 45]
+        supply_surplus = float(player.food_cap) - float(player.food_used)
+        minerals = float(player.minerals)
+        vespene = float(player.vespene)
+        
+        # --- 套用防呆規則 ---
+        if (supply_surplus >= 16 or depots >= 3) and 1 in allowed_acts: allowed_acts.remove(1)
+        if float(player.food_workers) >= 22 and 14 in allowed_acts: allowed_acts.remove(14)
+        
+        # 👉 修正 2：兵營只要有 2 座就夠了，禁止再蓋，避免卡建築網格
+        if barracks >= 2 and 2 in allowed_acts: allowed_acts.remove(2)
+        if depots == 0 and 2 in allowed_acts: allowed_acts.remove(2)
+            
+        if barracks == 0:
+            if 11 in allowed_acts: allowed_acts.remove(11)
+            # 👉 移除 44 的連帶修改
+            for act in [16, 18, 34]: 
+                if act in allowed_acts: allowed_acts.remove(act)
+                
+        if techlabs == 0 and 18 in allowed_acts: allowed_acts.remove(18)
+        if refineries >= 1 and 11 in allowed_acts: allowed_acts.remove(11)
+        has_geyser = np.any(s_unit == 342) or np.any(s_unit == 341)
+        if not has_geyser and 11 in allowed_acts: allowed_acts.remove(11)
+        if refineries == 0 and 42 in allowed_acts: allowed_acts.remove(42)
+        
+        # 👉 修正 3：如果瓦斯已經大於 150，禁止再瘋狂派兵去採瓦斯 (截斷 Action 42 的無限迴圈)
+        if vespene >= 150 and 42 in allowed_acts: allowed_acts.remove(42)
+            
+        if player.idle_worker_count == 0 and 41 in allowed_acts: allowed_acts.remove(41)
+        
+        if supply_surplus < 1:
+            for act in [14, 16]: 
+                if act in allowed_acts: allowed_acts.remove(act)
+        if supply_surplus < 2 and 18 in allowed_acts: allowed_acts.remove(18)
+        
+        if minerals < 50:
+            for act in [14, 16, 34]: 
+                if act in allowed_acts: allowed_acts.remove(act)
+        if minerals < 75 and 11 in allowed_acts: allowed_acts.remove(11)
+        if minerals < 100:
+            for act in [1, 18]: 
+                if act in allowed_acts: allowed_acts.remove(act)
+        if minerals < 150 and 2 in allowed_acts: allowed_acts.remove(2)
+        
+        if vespene < 25 and 18 in allowed_acts: allowed_acts.remove(18)
+        if vespene < 50 and 34 in allowed_acts: allowed_acts.remove(34)
+        
+        return [VALID_ACTIONS.index(act) for act in allowed_acts]
+
     def train_model():
-        if len(memory) < batch_size:
+        seq_len = 8 # 🎬 關鍵設定：每次讓 LSTM 回想連續的 8 步
+        batch_episodes_count = 16 # 每次隨機抽取 16 局遊戲來學習
+        
+        # 確保記憶庫裡有足夠的「對局」
+        if len(memory) < batch_episodes_count:
             return
             
-        half_batch = batch_size // 2
+        half_batch = batch_episodes_count // 2
         
-        # 你的黃金記憶庫邏輯...
+        # 1. 抽取整局遊戲 (Episodes)
         if len(success_memory) >= half_batch:
-            batch_normal = random.sample(memory, half_batch)
-            batch_success = random.sample(success_memory, half_batch)
-            batch = batch_normal + batch_success
-            # ✨ 2. 記得加上這行！把兩種記憶打亂，避免 AI 死背順序
-            random.shuffle(batch) 
+            batch_episodes = random.sample(memory, half_batch) + random.sample(success_memory, half_batch)
         else:
-            batch = random.sample(memory, batch_size)
-
-        states = torch.FloatTensor(np.array([x[0] for x in batch])).to(device)
-        actions = torch.LongTensor(np.array([x[1] for x in batch])).to(device)
-        rewards = torch.FloatTensor(np.array([x[2] for x in batch])).to(device)
-        next_states = torch.FloatTensor(np.array([x[3] for x in batch])).to(device)
-        # ...(前面 states, actions, rewards 的解包保持不變)...
-        dones = torch.FloatTensor(np.array([x[4] for x in batch])).to(device)
+            batch_episodes = random.sample(memory, batch_episodes_count)
+            
+        # 打亂抽出來的對局順序
+        random.shuffle(batch_episodes)
         
-        # ✨ N-Step 新增：讀取包裹裡的 Gamma 衰減乘數 (第 7 個元素)
-        gamma_mults = torch.FloatTensor(np.array([x[7] for x in batch])).to(device)
-
-        # 把記憶包從 Memory 中解開
-        h_in = torch.cat([x[5][0] for x in batch], dim=1)
-        c_in = torch.cat([x[5][1] for x in batch], dim=1)
-        next_h_in = torch.cat([x[6][0] for x in batch], dim=1)
-        next_c_in = torch.cat([x[6][1] for x in batch], dim=1)
-
-        q_actions, _, _ = brain_model(states, (h_in, c_in))
-        q_values = q_actions.gather(1, actions.unsqueeze(1)).squeeze(1)
-
-        with torch.no_grad():
-            # 1. 第一大腦 (Brain) 負責挑選未來最棒的「動作」
-            next_q_actions_brain, _, _ = brain_model(next_states, (next_h_in, next_c_in))
-            best_actions = next_q_actions_brain.max(1)[1].unsqueeze(1) 
-            
-            # 2. 第二大腦 (Target) 負責幫這個動作「客觀打分數」
-            next_q_actions_target, _, _ = target_model(next_states, (next_h_in, next_c_in))
-            max_next_q = next_q_actions_target.gather(1, best_actions).squeeze(1)
-            
-            # ✨ 3. N-Step 結合：使用包裹裡的 gamma_mults 算最終期望值
-            target_q = rewards + (gamma_mults * max_next_q * (1 - dones))
-            
-
-        loss = nn.MSELoss()(q_values, target_q)
         optimizer.zero_grad()
-        loss.backward()
-        optimizer.step()
+        total_loss = 0
+        valid_sequences = 0
+        
+        # 2. 對每一局遊戲抽出的「連續片段」進行學習
+        for ep in batch_episodes:
+            if len(ep) < seq_len:
+                continue # 忽略太短的遊戲記憶
+                
+            valid_sequences += 1
+            # 隨機挑選這局裡面的一段連續時間 (例如第 10 步 ~ 第 17 步)
+            start_idx = random.randint(0, len(ep) - seq_len)
+            sequence = ep[start_idx : start_idx + seq_len]
+            
+            # 拿出這段記憶「最一開始」的隱藏狀態，作為 LSTM 的回憶起點
+            # sequence[0][5] 對應的是當時存入的 hidden_state (h_in, c_in)
+            h_in, c_in = sequence[0][5] 
+            hidden = (h_in.to(device), c_in.to(device))
+            
+            # 3. 順著時間線，一步一步推演這段記憶
+            for step_data in sequence:
+                # 將資料解包並轉為 Tensor (加上 unsqueeze(0) 模擬 batch_size=1)
+                state = torch.FloatTensor([step_data[0]]).to(device)
+                action = torch.LongTensor([step_data[1]]).to(device)
+                reward = torch.FloatTensor([step_data[2]]).to(device)
+                next_state = torch.FloatTensor([step_data[3]]).to(device)
+                done = torch.FloatTensor([step_data[4]]).to(device)
+                gamma_mult = torch.FloatTensor([step_data[7]]).to(device)
+                next_allowed = step_data[8]  # 👈 拿出這一步的合法動作名單
+                # 第一大腦 (Brain) 回想這一步，並產生「新的隱藏狀態」給下一步用
+                q_actions, _, next_hidden = brain_model(state, hidden)
+                q_value = q_actions.gather(1, action.unsqueeze(1)).squeeze(1)
+                
+                with torch.no_grad():
+                    # 第一大腦預測下一步的最佳動作
+                    next_q_actions_brain, _, _ = brain_model(next_state, next_hidden)
+                    
+                    mask = torch.full_like(next_q_actions_brain, float('-inf'))
+                    mask[0, next_allowed] = 0
+                    masked_next_q_brain = next_q_actions_brain + mask
+
+                    # 👉 修正這行：從「套用過遮罩 (masked) 」的分數裡面挑選最大值！
+                    # 原本是 next_q_actions_brain.max...，現在改成 masked_next_q_brain.max...
+                    best_next_action = masked_next_q_brain.max(1)[1].unsqueeze(1)
+                    
+                    # 第二大腦 (Target) 針對該動作打客觀分數
+                    next_q_actions_target, _, _ = target_model(next_state, next_hidden)
+                    max_next_q = next_q_actions_target.gather(1, best_next_action).squeeze(1)
+                    
+                    # 計算最終期望值 (Bellman Equation)
+                    target_q = reward + (gamma_mult * max_next_q * (1 - done))
+                # 累加這一步的誤差
+                loss = nn.SmoothL1Loss()(q_value, target_q) # ✨ 改成這個！
+                total_loss += loss
+                
+                # ✨ 關鍵：將更新後的大腦記憶傳遞給時間線的「下一步」
+                hidden = next_hidden
+                
+        # 4. 根據這批連續記憶的總誤差，更新神經網路
+        if valid_sequences > 0 and isinstance(total_loss, torch.Tensor):
+            # 取平均避免梯度爆炸
+            mean_loss = total_loss / (valid_sequences * seq_len) 
+            mean_loss.backward()
+            optimizer.step()
 
     with sc2_env.SC2Env(
         map_name="Simple96",
@@ -336,6 +431,14 @@ def main(argv):
                 
                 # (1) 取得當前狀態 (補上 current_time_loop)
                 state = get_state_vector(obs, current_block, target_project_id, last_action_id, last_action_success, current_time_loop)
+                if agent.locked_action is not None:
+                    # 讓底層代理人繼續完成他未完成的動作，傳入 0 (no_op) 代表 DQN 不給新指令
+                    sc2_action = agent.get_action(obs, 0, parameter=1)
+                    obs_list = env.step([sc2_action, actions.FUNCTIONS.no_op()])
+                    obs = obs_list[0]
+                    # 累積一點微小的時間扣分到全域，但不存入 DQN 記憶
+                    total_reward -= 0.1 
+                    continue
                 state_t = torch.FloatTensor(np.array(state)).to(device)
                # --- ✨ 統一計算真實的建築數量 (基於執行動作前的畫面 s_unit) ---
                 barracks_pixels = np.sum((s_unit == 21) & (s_player == 1))
@@ -354,105 +457,15 @@ def main(argv):
                 # ==========================================
                 # ✨ 升級版：科技樹動態動作遮罩 (Tech-Tree Masking)
                 # ==========================================
-                allowed_actions = [1, 2, 11, 14, 16, 18, 34, 41, 42, 44, 45]
-
-                # B. 補給站防呆：人口足夠時，或已經有 3 座補給站，絕對不准再蓋 (Action 1)
-                supply_surplus = float(player.food_cap) - float(player.food_used)
-                if (supply_surplus >= 16 or current_depots >= 3) and 1 in allowed_actions:
-                    allowed_actions.remove(1)
-                # A. 工兵數量鎖定：一個基地最多只要 22 隻工兵，超過絕對不准再造 (Action 14)
-                if float(player.food_workers) >= 22 and 14 in allowed_actions:
-                    allowed_actions.remove(14)
-
-                # B. 補給站防呆：人口足夠時，不准蓋補給站 (Action 1)
-                supply_surplus = player.food_cap - player.food_used
-                if supply_surplus >= 16 and 1 in allowed_actions:
-                    allowed_actions.remove(1)
-                    
-                # C. 兵營防呆：兵營 >= 3 座，不准再蓋兵營 (Action 2)
-                if current_barracks >= 3 and 2 in allowed_actions:
-                    allowed_actions.remove(2)
-
-                # D. 【關鍵】科技室與造兵防呆：如果沒有兵營，絕對不准蓋科技室或造兵！
-                if current_barracks == 0:
-                    for act in [16, 18, 34]: # 16陸戰隊, 18掠奪者, 34科技室
-                        if act in allowed_actions: allowed_actions.remove(act)
-
-                # E. 【關鍵】掠奪者防呆：如果沒有科技室，絕對不准造掠奪者！
-                if current_techlabs == 0:
-                    if 18 in allowed_actions: allowed_actions.remove(18)
-
-                # F. 瓦斯廠防呆：瓦斯廠 >= 2 座，不准再蓋瓦斯廠 (Action 11)
-                if current_refineries >= 1:
-                    if 11 in allowed_actions: allowed_actions.remove(11)
-                has_geyser = np.any(s_unit == 342) or np.any(s_unit == 341)
                 
-                if not has_geyser:
-                    if 11 in allowed_actions: 
-                        allowed_actions.remove(11)
-
-                # G. 【關鍵】採瓦斯防呆：如果沒有瓦斯廠，絕對不准派工兵去採瓦斯 (Action 42)
-                if current_refineries == 0:
-                    if 42 in allowed_actions: allowed_actions.remove(42)
-
                 # ==========================================
-                # H. ✨ 終極 UI 反灰機制 (沒有資源/目標，按鈕絕對不亮)
+                # ✨ 升級版：科技樹動態動作遮罩 (Tech-Tree Masking)
                 # ==========================================
-                # 1. 沒建築/沒對象 絕對不准選
-                if current_barracks == 0:
-                    if 44 in allowed_actions: allowed_actions.remove(44) # 沒兵營不准選兵營
-                    
-                if player.idle_worker_count == 0:
-                    if 41 in allowed_actions: allowed_actions.remove(41) # 沒閒置工兵不准選閒置工兵
                 
-                # 2. 資源與人口不足鎖定 (沒錢沒人口就不准造)
-                minerals = float(player.minerals)
-                vespene = float(player.vespene)
-                supply_left = float(player.food_cap) - float(player.food_used)
+                # 👉 呼叫我們寫好的神級防呆函數，直接取得 0~10 的合法索引！
+                allowed_indices = get_action_mask(obs)
 
-                # --- 人口不足防呆 ---
-                if supply_left < 1:
-                    for act in [14, 16]: # SCV, 陸戰隊 (需 1 人口)
-                        if act in allowed_actions: allowed_actions.remove(act)
-                if supply_left < 2:
-                    if 18 in allowed_actions: allowed_actions.remove(18) # 掠奪者 (需 2 人口)
-
-                # --- 晶礦不足防呆 ---
-                if minerals < 50:
-                    for act in [14, 16, 34]: # SCV, 陸戰隊, 科技室
-                        if act in allowed_actions: allowed_actions.remove(act)
-                if minerals < 75:
-                    if 11 in allowed_actions: allowed_actions.remove(11) # 瓦斯廠
-                if minerals < 100:
-                    for act in [1, 18]: # 補給站, 掠奪者
-                        if act in allowed_actions: allowed_actions.remove(act)
-                if minerals < 150:
-                    if 2 in allowed_actions: allowed_actions.remove(2)   # 兵營
-
-                # --- 瓦斯不足防呆 ---
-                if vespene < 25:
-                    if 18 in allowed_actions: allowed_actions.remove(18) 
-                if vespene < 50:
-                    if 34 in allowed_actions: allowed_actions.remove(34) 
-                    
-                # ==========================================
-                # ✨ 3. 選擇狀態防呆 (最核心的解藥)
-                # ==========================================
-                # 如果眼睛看到「沒有選中兵營」，那就絕對不准點擊造兵按鈕！
-                if state[10] == 0.0:  # state[10] 就是我們剛剛新增的 is_barracks_selected
-                    for act in [16, 18, 34]: # 陸戰隊, 掠奪者, 科技室
-                        if act in allowed_actions: allowed_actions.remove(act)
-                # ==========================================
-
-                # H. 資源不足鎖定：沒錢就不要想著蓋兵營 (需要 150 礦)
-                if float(player.minerals) < 150 and 2 in allowed_actions:
-                    allowed_actions.remove(2)
-                # ==========================================
-                # ✨ 拘束器生效：將星海真實的 Action ID 轉換成神經網路的 0~10 索引
-                # ==========================================
-                # 取得目前「合法動作」在 0~10 裡面的對應位置
-                allowed_indices = [VALID_ACTIONS.index(act) for act in allowed_actions]
-
+                
                 # 選擇動作 (降維版 + 拘束器發威)
                 if random.random() <= epsilon:
                     # ✨ 從「合法」的選項中隨機挑選索引！(不再是全部盲選)
@@ -494,7 +507,8 @@ def main(argv):
                 # 執行動作並進入下一幀
                 obs_list = env.step([sc2_action, actions.FUNCTIONS.no_op()])
                 next_obs = obs_list[0]
-                
+                next_allowed_indices = get_action_mask(next_obs)
+
                 if sc2_action.function != 0:
                     current_action_success = 1.0
                 else:
@@ -619,29 +633,31 @@ def main(argv):
                 GAMMA = 0.99
                 
                 # 1. 先把當前這一步丟進緩衝區
-                current_transition = (state, action_index, scaled_reward, next_state, done, hidden_state, next_hidden_state)
+                current_transition = (state, action_index, scaled_reward, next_state, done, hidden_state, next_hidden_state, next_allowed_indices)
                 n_step_buffer.append(current_transition)
 
                 # 2. 如果視窗滿了，結算過去 N 步的總報酬，並存入大腦
                 if len(n_step_buffer) == N_STEP:
-                    # 總報酬 = r_0 + (gamma * r_1) + (gamma^2 * r_2)
                     n_reward = sum([n_step_buffer[i][2] * (GAMMA ** i) for i in range(N_STEP)])
                     
-                    # 拿「第 0 步」的狀態，配上「第 N 步」的結果
                     n_state = n_step_buffer[0][0]
                     n_action = n_step_buffer[0][1]
                     n_next_state = n_step_buffer[-1][3]
                     n_done = n_step_buffer[-1][4]
                     n_hidden_in = n_step_buffer[0][5]
                     n_hidden_out = n_step_buffer[-1][6]
+                    n_next_allowed = n_step_buffer[-1][7]
+
+                    # ✨ 打包成新的 N-Step 包裹
+                    n_transition = (n_state, n_action, n_reward, n_next_state, n_done, n_hidden_in, n_hidden_out, GAMMA ** N_STEP, n_next_allowed)
                     
-                    # ✨ 打包成新的 N-Step 包裹 (多存入了一個 Gamma 衰減乘數)
-                    n_transition = (n_state, n_action, n_reward, n_next_state, n_done, n_hidden_in, n_hidden_out, GAMMA ** N_STEP)
-                    
+                    # 👉 加上這行！把這一刻的記憶確實寫入整局的歷史中
+                    episode_memory.append(n_transition)
                     
                     # 滑動視窗：移除最舊的一步，讓下一步進來
                     n_step_buffer.popleft() 
 
+                # 3. 遊戲結束時，強制清空並結算緩衝區裡剩下的尾巴
                 # 3. 遊戲結束時，強制清空並結算緩衝區裡剩下的尾巴
                 if done:
                     while len(n_step_buffer) > 0:
@@ -654,23 +670,28 @@ def main(argv):
                         n_hidden_in = n_step_buffer[0][5]
                         n_hidden_out = n_step_buffer[-1][6]
                         
-                        n_transition = (n_state, n_action, n_reward, n_next_state, n_done, n_hidden_in, n_hidden_out, GAMMA ** actual_n)
-                        memory.append(n_transition)
+                        # 👉 新增這行：拿出最後一步的合法名單
+                        n_next_allowed = n_step_buffer[-1][7]
+                        
+                        # 👉 修改這行：把 n_next_allowed 打包進去 (變成 9 個參數，與上方統一)
+                        n_transition = (n_state, n_action, n_reward, n_next_state, n_done, n_hidden_in, n_hidden_out, GAMMA ** actual_n, n_next_allowed)
+                        
                         episode_memory.append(n_transition)
                         n_step_buffer.popleft()
-                # ==========================================
-                # ==========================================
-                # ⚠️ 第四步：黃金記憶守門員 (只有贏家能進)
-                # ==========================================
+               
                 if done:
+                    # 👉 新增這行：把這整局的連續記憶打包存進一般記憶庫
+                    memory.append(episode_memory) 
+
                     if current_real_count >= 5:
-                        success_memory.extend(episode_memory)
-                        print(f"🌟 黃金記憶寫入！已將 {len(episode_memory)} 步成功經驗刻入大腦深層！")
+                        # 👉 修改這行：將 extend 改為 append，確保它存入的是一個完整的 List
+                        success_memory.append(episode_memory) 
+                        print(f"🌟 黃金記憶寫入！已將長度為 {len(episode_memory)} 步的完整經驗刻入大腦深層！")
 
                 # ==========================================
                 # ⚠️ 第五步：觸發訓練與更新迴圈變數
                 # ==========================================
-                if len(memory) > batch_size:
+                if len(memory) >= 10:
                     train_model()
 
                 hidden_state = next_hidden_state
@@ -716,8 +737,8 @@ def main(argv):
                 
             
             # 回合結束後更新 epsilon
-            # 回合結束後更新 epsilon
-            epsilon = max(learn_min, epsilon * epsilon_decay)
+            
+            epsilon = max(learn_min, epsilon * epsilon_decay)#
             
             # ✨ 4. 大腦同步機制：每隔 5 局，讓第二大腦吸收第一大腦的最新知識！
             if ep % 5 == 0:

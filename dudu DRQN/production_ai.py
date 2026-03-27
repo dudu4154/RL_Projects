@@ -680,14 +680,11 @@ class ProductionAI:
                 return actions.FUNCTIONS.Morph_SupplyDepot_Raise_quick("now")
             return self._select_unit(unit_type, SUPPLY_DEPOT_ID)
 
-        # [Action 34] 兵營升級 (奇數: 科技實驗室 / 偶數: 反應爐)
-        
-# [Action 34] 兵營升級 (優化穩定版)
+        # [Action 34] 兵營升級 (優化穩定版 - 補上鎖定機制)
         elif action_id == 34:
-            # 1. 決定要升級哪一種
-            is_tech_lab = 1#(self.active_parameter % 2 == 1)
+            is_tech_lab = 1 #(目前強制蓋科技實驗室)
             
-            # 2. 獲取動作 (優先嘗試通用型，再嘗試專用型)
+            # 獲取動作
             if is_tech_lab:
                 action = getattr(actions.FUNCTIONS, "Build_TechLab_quick", None)
                 if not action: action = getattr(actions.FUNCTIONS, "Build_TechLab_Barracks_quick", None)
@@ -697,17 +694,24 @@ class ProductionAI:
                 if not action: action = getattr(actions.FUNCTIONS, "Build_Reactor_Barracks_quick", None)
                 req_m, req_v = 50, 50
 
-            # 3. 執行升級 (若動作可用且資源足夠)
+            # 1. 執行升級 (若按鈕已出現且資源足夠)
             if action and action.id in available and player.minerals >= req_m and player.vespene >= req_v:
+                self.locked_action = None # 動作成功，解除鎖定
+                self.lock_timer = 0
                 return action("now")
             
-            # 4. 若無法執行，則精確選取兵營 (避免點擊到多個兵營的平均中心空地)
+            # 2. 如果正在鎖定等待按鈕出現 (這一步是原本漏掉的)
+            if self.locked_action == 34:
+                return actions.FUNCTIONS.no_op()
+            
+            # 3. 若還沒選到兵營，精確選取兵營並「啟動鎖定」
             barracks_centers = self._find_units_centers(unit_type, BARRACKS_ID)
             if barracks_centers:
-                # 隨機選一個兵營，增加 AI 嘗試不同建築的機會
+                self.locked_action = 34 # 👉 關鍵修正：鎖定動作，防止 AI 分心
+                self.lock_timer = 1
                 return actions.FUNCTIONS.select_point("select", random.choice(barracks_centers))
+            
             return actions.FUNCTIONS.no_op()
-
         # [Action 35] 軍工廠升級 (修正版：增加掛件偵測)
         elif action_id == 35:
             # 1. 判定要蓋哪種掛件
