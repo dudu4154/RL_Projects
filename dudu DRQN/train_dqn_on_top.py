@@ -221,7 +221,7 @@ def main(argv):
         target_model.load_state_dict(brain_model.state_dict())
         print("✅ 載入成功！接續之前的記憶繼續訓練...")
 
-    epsilon = 1.00; epsilon_decay = 0.998; gamma = 0.99 
+    epsilon = 1.00; epsilon_decay = 0.99; gamma = 0.98
 
     def get_action_mask(target_obs):
         """ 根據當前畫面狀態，回傳合法的 Action 索引列表 """
@@ -377,7 +377,7 @@ def main(argv):
         
     ) as env:
         
-        for ep in range(3000):
+        for ep in range(10000):
             agent = ProductionAI()
             obs_list = env.reset()
             obs = obs_list[0]
