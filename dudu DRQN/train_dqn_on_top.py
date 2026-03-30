@@ -599,10 +599,18 @@ def main(argv):
                         print("⚡ 警告：浪費資源造太多陸戰隊！扣 50 分")
                     
                 if current_real_count > getattr(agent, 'last_target_count', 0):
-                    # ✨ 修正：把掠奪者的大獎翻倍成 1000 分，製造巨大吸引力！
-                    step_reward += 1000.0 
+
                     agent.last_target_count = current_real_count
-                    print(f"🎯 產出掠奪者！目前數量: {current_real_count}")
+                
+                    # 💡 核心邏輯：計算剩餘時間比例 (開局 1.0 -> 結束 0.0)
+                    # 總限時 13440 幀
+                    time_ratio = 1.0 - (current_loop / 13440.0)
+                
+                    # 基礎分 500 + 時間紅利 (最高 500)
+                    # 目的：誘導 AI 提早掛科技室、早採瓦斯，早產出的單位分拿更多
+                    unit_reward = 500.0 + (time_ratio * 500.0)
+                    step_reward += unit_reward
+                    print(f"🎯 掠奪者第 {current_real_count} 隻產出！獲得時效獎勵: +{unit_reward:.0f}")
 
                 # 6. 🏁 終局結算：規則永遠不變
                 current_loop = int(next_obs.observation.game_loop[0])
@@ -613,21 +621,39 @@ def main(argv):
                 # ==========================================
                 if done:
                     if current_real_count >= 5:
-                        step_reward += 3000.0 # 完美達成目標
-                        print(f"✅ 任務成功！產出 5 隻掠奪者 (耗時: {current_loop} 幀)")
-                        if current_loop <= 6720:
-                            step_reward += 2000.0 # 5分鐘內極速加碼
+                        # ✅ 成功結算：保底 3000 分
+                        step_reward += 3000.0
+                        
+                        # 💰 剩餘時間大獎金：最高可達 5000 分
+                        # 公式：(剩餘時間百分比) * 5000
+                        # 💡 目的：這是最強驅動力，逼迫 AI 壓縮所有建築時間，尋找最短路徑
+                        time_bonus = (1.0 - current_loop / 13440.0) * 5000.0
+                        step_reward += time_bonus
+                        print(f"✅ 任務成功！花費 {current_loop} 幀，剩餘時間獎金: +{time_bonus:.0f}")
                     else:
-                        step_reward -= 1000.0 # 沒達成目標統一扣分
-                        print(f"❌ 任務失敗：時間到未達成目標，結算懲罰")
+                        # ❌ 失敗結算：引入「完成度補償」
+                        # 💡 技巧：產越多隻扣越少 (例如產 4 隻只扣 360)
+                        # 讓 AI 在學會產 5 隻前，先努力產出 1 隻來減少懲罰，維持學習動力
+                        progress_ratio = current_real_count / 5.0
+                        failure_penalty = -1000.0 + (progress_ratio * 800.0)
+                        step_reward += failure_penalty
+                        print(f"❌ 任務失敗：完成度 {current_real_count}/5，最終結算懲罰: {failure_penalty:.0f}")
 
                 # ==========================================
                 # ⚠️ 第二步：取得下一步狀態與壓縮分數
                 # ==========================================
-                scaled_reward = step_reward / 1000.0  # (避免梯度爆炸)
+                scaled_reward = step_reward / 13000.0
+                
+                # 更新狀態向量，準備進入下一輪
                 next_time_loop = int(next_obs.observation.game_loop[0])
-                next_state = get_state_vector(next_obs, getattr(agent, 'active_parameter', 1), 18, a_id, current_action_success, next_time_loop)
-
+                next_state = get_state_vector(
+                    next_obs, 
+                    getattr(agent, 'active_parameter', 1), 
+                    18, 
+                    a_id, 
+                    current_action_success, 
+                    next_time_loop
+                )
                 # ==========================================
                 # ⚠️ 第三步：N-Step Bootstrapping 緩衝與寫入
                 # ==========================================
