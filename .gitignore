@@ -1,0 +1,19 @@
+﻿sc2_new_env/
+<<<<<<< HEAD
+logs/
+**/__pycache__/
+*.pyc
+*.pth
+=======
+>>>>>>> d3106dd487adc692a187b543eddec97a1e7efb14
+sc2_new_env/
+sc2_new_env/
+
+CYJ_and_don't_touch/my_agent/models/
+
+<<<<<<< HEAD
+=======
+__pycache__/
+
+!log/dqn_model.pth
+>>>>>>> d3106dd487adc692a187b543eddec97a1e7efb14

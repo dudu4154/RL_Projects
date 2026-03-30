@@ -1,0 +1,9 @@
+﻿sc2_new_env/
+sc2_new_env/
+sc2_new_env/
+
+my_agent/pvt_agent_fight.py
+
+__pycache__/
+
+!log/dqn_model.pth
