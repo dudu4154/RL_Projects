@@ -684,7 +684,7 @@ class ProductionAI:
         elif action_id == 34:
             is_tech_lab = 1 #(目前強制蓋科技實驗室)
             
-            # 獲取動作
+            # 獲取動
             if is_tech_lab:
                 action = getattr(actions.FUNCTIONS, "Build_TechLab_quick", None)
                 if not action: action = getattr(actions.FUNCTIONS, "Build_TechLab_Barracks_quick", None)

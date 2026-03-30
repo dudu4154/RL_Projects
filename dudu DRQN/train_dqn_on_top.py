@@ -221,7 +221,7 @@ def main(argv):
         target_model.load_state_dict(brain_model.state_dict())
         print("✅ 載入成功！接續之前的記憶繼續訓練...")
 
-    epsilon = 1.00; epsilon_decay = 0.99; gamma = 0.98
+    epsilon = 1.00; epsilon_decay = 0.99; gamma = 0.99
 
     def get_action_mask(target_obs):
         """ 根據當前畫面狀態，回傳合法的 Action 索引列表 """
