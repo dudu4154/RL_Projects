@@ -10,6 +10,8 @@ from collections import deque
 from pysc2.env import sc2_env
 from pysc2.lib import actions, features
 
+import os
+os.environ["SC2PATH"] = r"D:\StarCraft II"
 # 匯入底層腳本
 # --- train_dqn_on_top.py 的最上方 ---
 import production_ai
