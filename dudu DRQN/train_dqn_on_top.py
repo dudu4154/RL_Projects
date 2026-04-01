@@ -9,6 +9,7 @@ import time
 from collections import deque
 from pysc2.env import sc2_env
 from pysc2.lib import actions, features
+import pickle
 
 import os
 os.environ["SC2PATH"] = r"D:\StarCraft II"
@@ -199,6 +200,19 @@ def main(argv):
     success_memory = [] 
     MAX_ELITE_MEMORY = 300 # 設定排行榜最多收錄 1000 局
 
+    # 宣告排行榜路徑
+    elite_memory_path = os.path.join(log_dir, "elite_memory.pkl")
+    
+    # 嘗試載入舊的排行榜
+    if os.path.exists(elite_memory_path):
+        with open(elite_memory_path, "rb") as f:
+            success_memory = pickle.load(f)
+        print(f"📖 成功載入歷史菁英排行榜！目前收錄 {len(success_memory)} 局神操作。")
+    else:
+        success_memory = []
+        
+    MAX_ELITE_MEMORY = 1000
+
     gamma = 0.99
     logger = TrainingLogger() # 使用 TrainingLogger 紀錄產量
     learn_min = 0.01
@@ -298,7 +312,11 @@ def main(argv):
         
         # 1. 抽取整局遊戲 (Episodes)
         if len(success_memory) >= half_batch:
-            batch_episodes = random.sample(memory, half_batch) + random.sample(success_memory, half_batch)
+            # ✨ 從排行榜中隨機抽出幾局，並只提取 episode_memory (索引 1)
+            elite_samples = [ep for _, ep in random.sample(success_memory, half_batch)]
+            
+            # 把近期記憶跟菁英記憶混合
+            batch_episodes = random.sample(memory, half_batch) + elite_samples
         else:
             batch_episodes = random.sample(memory, batch_episodes_count)
             
@@ -433,13 +451,15 @@ def main(argv):
                 
                 # (1) 取得當前狀態 (補上 current_time_loop)
                 state = get_state_vector(obs, current_block, target_project_id, last_action_id, last_action_success, current_time_loop)
-                if agent.locked_action is not None:
-                    # 讓底層代理人繼續完成他未完成的動作，傳入 0 (no_op) 代表 DQN 不給新指令
-                    sc2_action = agent.get_action(obs, 0, parameter=1)
-                    obs_list = env.step([sc2_action, actions.FUNCTIONS.no_op()])
-                    obs = obs_list[0]
-                    # 累積一點微小的時間扣分到全域，但不存入 DQN 記憶
-                    total_reward -= 0.1 
+                sc2_action = agent.get_action(obs, 0, parameter=1)
+                obs_list = env.step([sc2_action, actions.FUNCTIONS.no_op()])
+                obs = obs_list[0]
+                total_reward -= 0.1 
+                    
+                # 👉 補上這段：防止遊戲在鎖定狀態下結束導致引擎崩潰
+                if obs.last() or int(obs.observation.game_loop[0]) >= 13440:
+                    print("⚠️ 遊戲在鎖定狀態中結束，安全跳出！")
+                    break # 直接結束這局，進入下一局
                     continue
                 state_t = torch.FloatTensor(np.array(state)).to(device)
                # --- ✨ 統一計算真實的建築數量 (基於執行動作前的畫面 s_unit) ---
@@ -686,7 +706,6 @@ def main(argv):
                     n_step_buffer.popleft() 
 
                 # 3. 遊戲結束時，強制清空並結算緩衝區裡剩下的尾巴
-                # 3. 遊戲結束時，強制清空並結算緩衝區裡剩下的尾巴
                 if done:
                     while len(n_step_buffer) > 0:
                         actual_n = len(n_step_buffer)
@@ -712,9 +731,17 @@ def main(argv):
                     memory.append(episode_memory) 
 
                     if current_real_count >= 5:
-                        # 👉 修改這行：將 extend 改為 append，確保它存入的是一個完整的 List
-                        success_memory.append(episode_memory) 
-                        print(f"🌟 黃金記憶寫入！已將長度為 {len(episode_memory)} 步的完整經驗刻入大腦深層！")
+                        success_memory.append((total_reward, episode_memory))
+                        success_memory.sort(key=lambda x: x[0], reverse=True)
+                        
+                        if len(success_memory) > MAX_ELITE_MEMORY:
+                            success_memory.pop()
+                            
+                        print(f"🏆 菁英榜更新！目前收錄 {len(success_memory)} 局，歷史最高分: {success_memory[0][0]:.1f}")
+                        
+                        # ✨ 新增：把更新後的排行榜備份到硬碟裡！
+                        with open(elite_memory_path, "wb") as f:
+                            pickle.dump(success_memory, f)
 
                 # ==========================================
                 # ⚠️ 第五步：觸發訓練與更新迴圈變數
