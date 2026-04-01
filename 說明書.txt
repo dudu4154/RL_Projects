@@ -44,3 +44,7 @@ python -m tensorboard.main --logdir=runs
 =======
 git reset --hard origin/main #git強制同步
 >>>>>>> d3106dd487adc692a187b543eddec97a1e7efb14
+
+
+cd "D:\RL_Projects\dudu DRQN"
+python train_dqn_on_top.py

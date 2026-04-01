@@ -379,6 +379,8 @@ def main(argv):
         
     ) as env:
         
+        current_session_file = f"d:/RL_Projects/dudu DRQN/log/dqn_training_log_{int(time.time())}.csv"
+        
         for ep in range(10000):
             agent = ProductionAI()
             obs_list = env.reset()
@@ -410,6 +412,14 @@ def main(argv):
                 torch.zeros(1, 1, 128).to(device)
             )
             print(f"\n--- 啟動第 {ep + 1} 局 ---")
+
+
+
+            episode_reward = 0.0  
+            step_reward = 0.0
+            achieved_milestones = set()
+            
+
             while True:
                 
                 
@@ -549,7 +559,7 @@ def main(argv):
                 # ==========================================
                 # 🏆 穩定版全局計分系統 (Dense Reward Shaping)
                 # ==========================================
-                step_reward = 0.0
+                '''step_reward = 0.0
                 
                 # 1. 基礎時間壓力：活著的每一幀都微扣一點點，逼迫它快點做事
                 step_reward -= 0.1
@@ -653,7 +663,89 @@ def main(argv):
                     a_id, 
                     current_action_success, 
                     next_time_loop
+                )'''
+
+                # 0. ✨ 初始化：每一步開始前歸零 (確保穩定收斂)
+                step_reward = 0.0
+                
+
+                # 1.科技樹里程碑 (麵包屑導航：數值極小化，只給方向不給刷分空間)
+                # 嚴厲邏輯：這些只是過程，不是目標。分數調低防止 AI 卡在「蓋完建築就發呆」。
+                #邏輯：當畫面上出現補給站（Depot）、兵營（Barracks）、瓦斯廠（Refinery）]或科技室（Techlab）時，給予 1.0 ~ 3.0 的微量加分。
+                if "depot" not in achieved_milestones and current_depots >= 1:
+                    step_reward += 1.0; achieved_milestones.add("depot")
+                if "barracks" not in achieved_milestones and current_barracks >= 1:
+                    step_reward += 2.0; achieved_milestones.add("barracks")
+                if "refinery" not in achieved_milestones and current_refineries >= 1:
+                    step_reward += 1.5; achieved_milestones.add("refinery")
+                if "techlab" not in achieved_milestones and current_techlabs >= 1:
+                    step_reward += 3.0; achieved_milestones.add("techlab")
+
+                # 2.核心產量獎勵 (掠奪者 Marauder)
+                if current_real_count > getattr(agent, 'last_target_count', 0):
+                    agent.last_target_count = current_real_count
+                    # 設計理念：我們不使用原本的 1000 分，而是改用 10 分。
+                    # 這能讓神經網路在更新權重時更穩定，不會因為一次巨大的脈衝訊號導致模型參數「飛掉」。
+                    step_reward += 10.0
+                    print(f"🎯 掠奪者產出！目前進度: {current_real_count}/5")
+
+                # 3.終局判定：由「幀數」主導的勝負邏輯
+                current_loop = int(next_obs.observation.game_loop[0])
+                # 定義回合結束的三個條件：遊戲結束、時間耗盡（13440 幀）、或達成 5 隻目標。
+                done = next_obs.last() or current_loop >= 13440 or current_real_count >= 5
+
+                # ==========================================
+                # ⚠️ 第一步：執行高壓的時間效率結算
+                # ==========================================
+                if done:
+                    if current_real_count >= 5:
+                        # 公式：(剩餘時間佔總時間的比例) * 50 分
+                        time_bonus = (1.0 - current_loop / 13440.0) * 50.0
+                        #time_bonus：這是一個線性獎勵
+                        # 如果 AI 在第 1 幀就完成，獎金接近 50；如果等到最後 1 幀才完成，獎金接近 0。
+                        #意義：強制 AI 優化路徑。AI 會發現發呆是很昂貴的，「省下的時間 = 賺到的分數」。
+                        step_reward += (50.0 + time_bonus)
+                        print(f"✅ 任務成功！剩餘時間獎金: +{time_bonus:.1f}")
+                    else:
+                        # 失敗結算：嚴厲倒扣，不給任何安慰分。
+                        # 嚴厲邏輯：沒產滿就是失敗，強制 AI 去探索「成功」的那條路。
+                        step_reward -= 20.0
+                        print(f"❌ 任務失敗：效率不足或時間耗盡，最終懲罰 -20")
+
+                # ==========================================
+                # ⚠️ 第二步：分數壓縮 (Normalization)
+                # ==========================================
+                # 💡 總分上限現在約為 100~110 (科技加分 + 5隻產量 + 成功獎金 + 時間獎金)
+                # 除以 160 可以讓 reward 完美落在1~-1附近，這是 DQN 最喜歡的區間。
+                scaled_reward = step_reward / 160.0
+                episode_reward += scaled_reward
+
+                # 🚀 加入這行測試！
+                if step_reward != 0:
+                    print(f"DEBUG: 這一幀加了 {step_reward} 分，累計總分: {episode_reward}")
+
+                next_time_loop = int(next_obs.observation.game_loop[0])
+                next_state = get_state_vector(
+                    next_obs, 
+                    getattr(agent, 'active_parameter', 1), 
+                    18, 
+                    a_id, 
+                    current_action_success, 
+                    next_time_loop
                 )
+                current_transition = (state, action_index, scaled_reward, next_state, done, hidden_state, next_hidden_state, next_allowed_indices)
+                n_step_buffer.append(current_transition)
+                
+
+
+                obs = next_obs
+                state = next_state
+                hidden_state = next_hidden_state
+                last_action_id = a_id
+                last_action_success = current_action_success
+
+
+
                 # ==========================================
                 # ⚠️ 第三步：N-Step Bootstrapping 緩衝與寫入
                 # ==========================================
@@ -678,7 +770,7 @@ def main(argv):
 
                     # ✨ 打包成新的 N-Step 包裹
                     n_transition = (n_state, n_action, n_reward, n_next_state, n_done, n_hidden_in, n_hidden_out, GAMMA ** N_STEP, n_next_allowed)
-                    
+                    #agent.store_transition(*n_transition)
                     # 👉 加上這行！把這一刻的記憶確實寫入整局的歷史中
                     episode_memory.append(n_transition)
                     
@@ -760,8 +852,17 @@ def main(argv):
                             if key == "techlab" and exists: final_t_count = 1
                     
                     # 4. 寫入 CSV 紀錄
-                    logger.log_episode(ep + 1, "掠奪者任務", epsilon, total_reward, current_loop, current_real_count, marine_count)
+                    print(f"!!! 即將寫入 CSV 的分數是: {episode_reward} (型別: {type(episode_reward)})")
+                    #logger.log_episode(ep + 1, "掠奪者任務", epsilon, float(episode_reward), current_loop, current_real_count, marine_count)
+                    #log_file = f"d:/RL_Projects/dudu DRQN/log/dqn_training_log_{int(time.time())}.csv"
+                    with open(current_session_file, "a", encoding="utf-8") as f:
+                        line = f"{ep+1},掠奪者任務,{epsilon:.3f},{episode_reward:.4f},{current_loop},{current_real_count},{marine_count}\n"
+                        f.write(line)
+                    print(f"✅ 已手動強制寫入 CSV: {episode_reward:.4f}")
                     break # ✨ 記得加上 break 跳出 while 迴圈
+
+                state = next_state
+                hidden_state = next_hidden_state
                 
             
             # 回合結束後更新 epsilon
