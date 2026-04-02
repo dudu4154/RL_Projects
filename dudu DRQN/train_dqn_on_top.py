@@ -694,12 +694,17 @@ def main(argv):
                 #邏輯：當畫面上出現補給站（Depot）、兵營（Barracks）、瓦斯廠（Refinery）]或科技室（Techlab）時，給予 1.0 ~ 3.0 的微量加分。
                 if "depot" not in achieved_milestones and current_depots >= 1:
                     step_reward += 1.0; achieved_milestones.add("depot")
+                    print(1)
                 if "barracks" not in achieved_milestones and current_barracks >= 1:
                     step_reward += 2.0; achieved_milestones.add("barracks")
+                    print(2)
                 if "refinery" not in achieved_milestones and current_refineries >= 1:
                     step_reward += 1.5; achieved_milestones.add("refinery")
+                    print(3)
                 if "techlab" not in achieved_milestones and current_techlabs >= 1:
                     step_reward += 3.0; achieved_milestones.add("techlab")
+                    print(4)
+
 
                 # 2.核心產量獎勵 (掠奪者 Marauder)
                 if current_real_count > getattr(agent, 'last_target_count', 0):
@@ -720,7 +725,7 @@ def main(argv):
                 if done:
                     if current_real_count >= 5:
                         # 公式：(剩餘時間佔總時間的比例) * 50 分
-                        time_bonus = (1.0 - current_loop / 13440.0) * 50.0
+                        time_bonus = (1.0 - (current_loop / 13440.0)) * 50.0
                         #time_bonus：這是一個線性獎勵
                         # 如果 AI 在第 1 幀就完成，獎金接近 50；如果等到最後 1 幀才完成，獎金接近 0。
                         #意義：強制 AI 優化路徑。AI 會發現發呆是很昂貴的，「省下的時間 = 賺到的分數」。
