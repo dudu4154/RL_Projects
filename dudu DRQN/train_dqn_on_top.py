@@ -397,7 +397,7 @@ def main(argv):
         
     ) as env:
         
-        current_session_file = f"d:/RL_Projects/dudu DRQN/log/dqn_training_log_{int(time.time())}.csv"
+        current_session_file = os.path.join(log_dir, f"dqn_training_log_{int(time.time())}.csv")
         
         for ep in range(10000):
             agent = ProductionAI()
@@ -771,10 +771,6 @@ def main(argv):
                 # ==========================================
                 N_STEP = 7
                 GAMMA = 0.99
-                
-                # 1. 先把當前這一步丟進緩衝區
-                current_transition = (state, action_index, scaled_reward, next_state, done, hidden_state, next_hidden_state, next_allowed_indices)
-                n_step_buffer.append(current_transition)
 
                 # 2. 如果視窗滿了，結算過去 N 步的總報酬，並存入大腦
                 if len(n_step_buffer) == N_STEP:
@@ -806,8 +802,8 @@ def main(argv):
                         n_action = n_step_buffer[0][1]
                         n_next_state = n_step_buffer[-1][3]
                         n_done = n_step_buffer[-1][4]
-                        n_hidden_in = n_step_buffer[0][5]
-                        n_hidden_out = n_step_buffer[-1][6]
+                        n_hidden_in = (n_step_buffer[0][5][0].cpu(), n_step_buffer[0][5][1].cpu())
+                        n_hidden_out = (n_step_buffer[-1][6][0].cpu(), n_step_buffer[-1][6][1].cpu())
                         
                         # 👉 新增這行：拿出最後一步的合法名單
                         n_next_allowed = n_step_buffer[-1][7]
@@ -831,14 +827,15 @@ def main(argv):
                             
                         print(f"🏆 菁英榜更新！目前收錄 {len(success_memory)} 局，歷史最高分: {success_memory[0][0]:.1f}")
                         
-                        # ✨ 新增：把更新後的排行榜備份到硬碟裡！
-                        with open(elite_memory_path, "wb") as f:
-                            pickle.dump(success_memory, f)
+                        # ✨ 修改：不要每局存，排行榜數量是 5 的倍數時才寫入硬碟
+                        if len(success_memory) % 5 == 0:
+                            with open(elite_memory_path, "wb") as f:
+                                pickle.dump(success_memory, f)
 
                 # ==========================================
                 # ⚠️ 第五步：觸發訓練與更新迴圈變數
                 # ==========================================
-                if len(memory) >= 10:
+                if len(memory) >= 10 and train_step_counter % 8 == 0:
                     train_model()
 
                 hidden_state = next_hidden_state
