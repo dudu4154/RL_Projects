@@ -1,189 +1,311 @@
-import sys, os, time, csv, numpy as np
-import torch
+import os, sys, csv, time, datetime, glob, torch
+import numpy as np
 import torch.nn as nn
 import torch.optim as optim
-import torch.nn.functional as F
 from torch.distributions import Categorical
-from absl import app, flags
-from pysc2.env import sc2_env
-from pysc2.lib import actions, features
+from absl import app
+from pysc2.env import sc2_env, environment
+from pysc2.lib import actions, features, units
 
 # =========================================================
-# 🛠 1. 環境路徑與系統設定
+# 🚩 1. 系統路徑與路徑設定
 # =========================================================
-# 根據你的路徑修正為 D:\Game\StarCraft II
-SC2_ROOT = r"D:\Game\StarCraft II"
-os.environ["SC2PATH"] = SC2_ROOT
+os.environ["SC2PATH"] = r"D:\Game\StarCraft II"
 
-# 模型與 Log 儲存路徑
-BASE_SAVE_PATH = r"C:\RL_Projects\CYJ_and_don't_touch\my_agent\models\DefeatRoaches"
-os.makedirs(BASE_SAVE_PATH, exist_ok=True)
+SAVE_DIR = r"C:\RL_Projects\CYJ_and_don't_touch\my_agent\models\DefeatRoaches"
+LOG_PATH = os.path.join(SAVE_DIR, "training_log.csv")
+os.makedirs(SAVE_DIR, exist_ok=True)
 
-MODEL_NEW = os.path.join(BASE_SAVE_PATH, "fullyconv_new_DefeatRoaches.pth")
-MODEL_BEST = os.path.join(BASE_SAVE_PATH, "fullyconv_best_DefeatRoaches.pth")
-LOG_CSV = os.path.join(BASE_SAVE_PATH, "training_log_DefeatRoaches.csv")
-
-# 超參數
-DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+# 訓練超參數 (完全對應 PPO 規範)
+SCREEN_SIZE = 64
+STEP_MUL = 8
 GAMMA = 0.99
-GAE_LAM = 0.95        # GAE 參數
-PPO_EPS = 0.2         # PPO Clipped 範圍
-BATCH_SIZE = 32       # Mini-batch 大小
-UPDATE_EPOCHS = 4
-STEP_MUL = 1          # 跳幀設定
+GAE_LAMBDA = 0.95
+PPO_CLIP = 0.2
+ENTROPY_COEF = 0.05
+BATCH_SIZE = 64      # 小分組訓練模式
+LR_START = 1e-4
+LR_MIN = 1e-5
+ANNEAL_EPISODES = 30000 
+MAX_EPISODES = 100000
+
+# 戰鬥權重 (LTD2)
+MARAUDER_DPS, ROACH_DPS = 20, 8
+LTD2_ALPHA = 0.01
 
 # =========================================================
-# 🧠 2. 模型架構：FullyConv (支援遷移學習)
+# 🧠 2. FullyConv PPO 神經網路 (10通道輸入)
 # =========================================================
-class ConvEncoder(nn.Module):
-    """特徵提取器：遷移學習的核心，保留對地圖空間的理解 [cite: 65]"""
-    def __init__(self, in_channels=4):
-        super().__init__()
-        self.net = nn.Sequential(
-            nn.Conv2d(in_channels, 16, 5, padding=2), nn.ReLU(),
-            nn.Conv2d(16, 32, 3, padding=1), nn.ReLU()
+class FullyConvPPO(nn.Module):
+    def __init__(self, in_channels, num_actions):
+        super(FullyConvPPO, self).__init__()
+        self.conv = nn.Sequential(
+            nn.Conv2d(in_channels, 32, kernel_size=3, padding=1), nn.ReLU(),
+            nn.Conv2d(32, 64, kernel_size=3, padding=1), nn.ReLU()
         )
-    def forward(self, x): return self.net(x)
+        self.action_head = nn.Sequential(
+            nn.Flatten(),
+            nn.Linear(64 * SCREEN_SIZE * SCREEN_SIZE, 256), nn.ReLU(),
+            nn.Linear(256, num_actions)
+        )
+        self.screen_head = nn.Conv2d(64, 1, kernel_size=1)
+        self.minimap_head = nn.Conv2d(64, 1, kernel_size=1)
+        self.value_head = nn.Sequential(
+            nn.Flatten(),
+            nn.Linear(64 * SCREEN_SIZE * SCREEN_SIZE, 256), nn.ReLU(),
+            nn.Linear(256, 1)
+        )
 
-class PPOAgentNet(nn.Module):
-    def __init__(self, action_dim=3):
-        super().__init__()
-        self.encoder = ConvEncoder()
-        self.fc = nn.Sequential(nn.Flatten(), nn.Linear(32*64*64, 256), nn.ReLU())
-        self.critic = nn.Linear(256, 1)
-        self.actor_type = nn.Linear(256, action_dim)
-        self.actor_spatial = nn.Conv2d(32, 1, 1) # 輸出 64x64 熱圖
-
-    def forward(self, x):
-        feat = self.encoder(x)
-        latent = self.fc(feat)
-        return self.actor_type(latent), self.actor_spatial(feat).view(-1, 64*64), self.critic(latent)
-
-# =========================================================
-# ⚙️ 3. 強化學習核心功能 (GAE & PPO)
-# =========================================================
-def compute_gae(rewards, masks, values, last_v=0):
-    """計算廣義優勢估計 (GAE) [cite: 57, 80]"""
-    advs = torch.zeros_like(rewards)
-    gae = 0
-    for t in reversed(range(len(rewards))):
-        next_v = values[t+1] if t+1 < len(values) else last_v
-        delta = rewards[t] + GAMMA * next_v * masks[t] - values[t]
-        gae = delta + GAMMA * GAE_LAM * masks[t] * gae
-        advs[t] = gae
-    return advs, advs + values
-
-def train_ppo(model, optimizer, memory):
-    """小分組 PPO 更新"""
-    s = torch.cat(memory['s'])
-    at = torch.tensor(memory['at']).to(DEVICE)
-    old_lp = torch.cat(memory['lp']).detach()
-    rets = memory['ret']
-    advs = memory['adv']
-
-    l_val, e_val = 0, 0
-    idx = np.arange(len(s))
-    for _ in range(UPDATE_EPOCHS):
-        np.random.shuffle(idx)
-        for i in range(0, len(idx), BATCH_SIZE):
-            mb = idx[i : i + BATCH_SIZE]
-            t_logits, _, val = model(s[mb])
-            
-            dist = Categorical(F.softmax(t_logits, dim=-1))
-            new_lp = dist.log_prob(at[mb])
-            ratio = torch.exp(new_lp - old_lp[mb])
-            
-            # Clipped Objective
-            s1 = ratio * advs[mb]
-            s2 = torch.clamp(ratio, 1-PPO_EPS, 1+PPO_EPS) * advs[mb]
-            
-            loss = -torch.min(s1, s2).mean() + 0.5 * F.mse_loss(val.squeeze(), rets[mb]) - 0.01 * dist.entropy().mean()
-            optimizer.zero_grad(); loss.backward(); optimizer.step()
-            l_val += loss.item(); e_val += dist.entropy().mean().item()
-    return l_val / (UPDATE_EPOCHS * (len(idx)/BATCH_SIZE)), e_val / (UPDATE_EPOCHS * (len(idx)/BATCH_SIZE))
+    def forward(self, x, action_mask):
+        feat = self.conv(x)
+        act_logits = torch.clamp(self.action_head(feat), -10, 10)
+        # 🚩 動作遮罩：不可選動作機率設為 -1e9 (Logits)
+        act_logits = act_logits.masked_fill(action_mask == 0, -1e9)
+        act_probs = torch.softmax(act_logits, dim=-1)
+        
+        screen_probs = torch.softmax(self.screen_head(feat).view(-1, SCREEN_SIZE**2), dim=-1)
+        minimap_probs = torch.softmax(self.minimap_head(feat).view(-1, SCREEN_SIZE**2), dim=-1)
+        value = self.value_head(feat)
+        return act_probs, screen_probs, minimap_probs, value
 
 # =========================================================
-# 🚀 4. 主執行程序
+# 🛠️ 3. 狀態與獎勵工具 (整合 LTD2 與 最短距離)
+# =========================================================
+def get_state(obs):
+    """ 依要求提取 10 通道視覺空間 """
+    s = obs.observation.feature_screen
+    m = obs.observation.feature_minimap
+    layers = [
+        s.player_relative, s.unit_type, s.selected, s.unit_hit_points_ratio,
+        s.height_map, s.pathable, 
+        m.player_relative, m.camera, m.selected, m.visibility_map
+    ]
+    return torch.from_numpy(np.stack(layers).astype(np.float32))
+
+class RewardCalculator:
+    def __init__(self):
+        self.last_f_ltd2 = 0
+        self.last_e_ltd2 = 0
+        self.last_min_dist = 99.0
+
+    def calculate(self, obs):
+        r_env = obs.reward 
+        units_list = obs.observation.feature_units
+        friendly = [u for u in units_list if u.alliance == 1]
+        enemy = [u for u in units_list if u.alliance == 4]
+
+        # 計算當前戰場 LTD2 價值
+        curr_f_ltd2 = sum([u.health * MARAUDER_DPS for u in friendly])
+        curr_e_ltd2 = sum([u.health * ROACH_DPS for u in enemy])
+
+        # 🚩 最短敵我距離計算 (用於拉打)
+        current_min_dist = 99.0
+        if friendly and enemy:
+            fx, fy = np.array([u.x for u in friendly]), np.array([u.y for u in friendly])
+            ex, ey = np.array([u.x for u in enemy]), np.array([u.y for u in enemy])
+            dists = np.sqrt((fx[:, None] - ex)**2 + (fy[:, None] - ey)**2)
+            current_min_dist = np.min(dists)
+
+        # 安全判定：開局或擊殺瞬間不計 LTD2 差分，防爆
+        if obs.first() or r_env > 0:
+            self.last_f_ltd2, self.last_e_ltd2, self.last_min_dist = curr_f_ltd2, curr_e_ltd2, current_min_dist
+            return float(r_env)
+
+        # LTD2 差分獎勵 (敵損 - 我損)
+        r_ltd2 = ((self.last_e_ltd2 - curr_e_ltd2) - (self.last_f_ltd2 - curr_f_ltd2)) * LTD2_ALPHA
+        
+        # 距離拉打加分：射程邊緣 [5,6] 給予麵包屑獎勵
+        r_dist = 0.01 if 5.0 <= current_min_dist <= 6.0 else (-0.01 if current_min_dist < 4.0 else 0)
+
+        total_r = r_env + r_ltd2 + r_dist - 0.01 # 含時間懲罰
+        self.last_f_ltd2, self.last_e_ltd2, self.last_min_dist = curr_f_ltd2, curr_e_ltd2, current_min_dist
+        
+        return float(np.clip(total_r, -0.5, 0.5))
+
+def cleanup_old_models(save_dir, keep_last=5):
+    files = sorted(glob.glob(os.path.join(save_dir, "defeat_roaches_ep*.pth")), key=os.path.getctime)
+    if len(files) >= keep_last:
+        for f in files[:(len(files) - keep_last + 1)]:
+            try: os.remove(f)
+            except: pass
+
+# =========================================================
+# 📈 4. PPO 更新核心 (包含 Mini-batch 與 梯度裁剪)
+# =========================================================
+def ppo_update(model, optimizer, states, actions, log_probs, returns, advantages, masks_list, device):
+    st = torch.stack(states).to(device)
+    ret = torch.tensor(returns, dtype=torch.float32).to(device).view(-1, 1)
+    adv = torch.tensor(advantages, dtype=torch.float32).to(device).view(-1, 1)
+    adv = (adv - adv.mean()) / (adv.std() + 1e-8)
+    msk = torch.stack(masks_list).to(device)
+
+    optimizer.zero_grad()
+    p, sp, _, values = model(st, msk)
+    
+    # 🚩 解決 Simplex 錯誤
+    def force_simplex(t):
+        t64 = t.to(torch.float64) + 1e-12
+        return (t64 / t64.sum(dim=-1, keepdim=True)).to(torch.float32)
+
+    p, sp = force_simplex(p), force_simplex(sp)
+    dist_a, dist_s = Categorical(p), Categorical(sp)
+    
+    a_t = torch.tensor([a[0] for a in actions], dtype=torch.long).to(device)
+    s_t = torch.tensor([a[1] for a in actions], dtype=torch.long).to(device)
+    
+    new_lp = dist_a.log_prob(a_t) + dist_s.log_prob(s_t)
+    old_lp = torch.tensor(log_probs, dtype=torch.float32).to(device)
+
+    ratio = torch.exp(new_lp - old_lp)
+    surr1, surr2 = ratio * adv.squeeze(), torch.clamp(ratio, 1.0 - PPO_CLIP, 1.0 + PPO_CLIP) * adv.squeeze()
+    
+    p_loss = -torch.min(surr1, surr2).mean()
+    v_loss = 0.5 * nn.MSELoss()(values, ret)
+    ent = dist_a.entropy().mean()
+    
+    loss = p_loss + v_loss - ENTROPY_COEF * ent
+    loss.backward()
+    nn.utils.clip_grad_norm_(model.parameters(), 0.5) # 防止梯度爆炸
+    
+    valid = all(p.grad is not None and torch.isfinite(p.grad).all() for p in model.parameters() if p.requires_grad)
+    if valid: optimizer.step()
+    return p_loss.item(), v_loss.item(), loss.item(), ent.item()
+
+# =========================================================
+# 🕹️ 5. 訓練主程式 (含新高紀錄與全滅觸發)
 # =========================================================
 def main(unused_argv):
-    model = PPOAgentNet().to(DEVICE)
-    optimizer = optim.Adam(model.parameters(), lr=3e-4)
-    start_ep, best_r = 0, -1.0
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model = FullyConvPPO(10, 6).to(device)
+    optimizer = optim.Adam(model.parameters(), lr=LR_START)
+    reward_tool = RewardCalculator()
+    
+    start_ep, best_reward = 0, -999.0
 
-    # 繼承機制 (載入權重與優化器梯度動量)
-    for p in [MODEL_BEST, MODEL_NEW]:
-        if os.path.exists(p):
-            ckpt = torch.load(p, map_location=DEVICE)
-            model.load_state_dict(ckpt['model'])
-            optimizer.load_state_dict(ckpt['opt'])
-            start_ep, best_r = ckpt['ep'], ckpt['r']
-            print(f"[*] 載入成功: {os.path.basename(p)} | 起始回合: {start_ep}")
-            break
+    # 🔍 搜尋進度 (不讀取 MoveToBeacon)
+    dr_files = sorted(glob.glob(os.path.join(SAVE_DIR, "defeat_roaches_ep*.pth")), key=os.path.getctime, reverse=True)
+    if dr_files:
+        try:
+            ckpt = torch.load(dr_files[0], map_location=device)
+            model.load_state_dict(ckpt['model_state'])
+            optimizer.load_state_dict(ckpt['optimizer_state'])
+            start_ep = ckpt['epoch'] + 1
+            best_reward = ckpt.get('best_reward', -999.0)
+            print(f"[*] 🔄 續傳成功: {os.path.basename(dr_files[0])} (Ep {start_ep})")
+        except: print("⚠️ [跳過] 損壞檔案...")
 
-    log_f = open(LOG_CSV, 'a', newline=''); writer = csv.writer(log_f)
-    if os.path.getsize(LOG_CSV) == 0: writer.writerow(['Episode', 'Reward', 'Loss', 'Entropy'])
+    if not os.path.exists(LOG_PATH):
+        with open(LOG_PATH, 'w', newline='') as f:
+            csv.writer(f).writerow(['Episode', 'Timestamp', 'Reward', 'PolicyLoss', 'ValueLoss', 'Loss', 'Entropy', 'LR'])
 
-    env = sc2_env.SC2Env(map_name="DefeatRoaches", step_mul=STEP_MUL,
-                         players=[sc2_env.Agent(sc2_env.Race.terran)],
-                         agent_interface_format=features.AgentInterfaceFormat(
-                             feature_dimensions=features.Dimensions(screen=64, minimap=64), use_feature_units=True))
+    env = sc2_env.SC2Env(map_name="DefeatRoaches", 
+                        players=[sc2_env.Agent(sc2_env.Race.terran)],
+                        agent_interface_format=features.AgentInterfaceFormat(
+                            feature_dimensions=features.Dimensions(screen=64, minimap=64),
+                            use_feature_units=True),
+                        step_mul=STEP_MUL)
 
     try:
-        for ep in range(start_ep + 1, 100000):
+        for ep in range(start_ep, MAX_EPISODES):
+            # 學習率線性退火
+            lr_prog = min(1.0, ep / ANNEAL_EPISODES)
+            current_lr = LR_START - (LR_START - LR_MIN) * lr_prog
+            for pg in optimizer.param_groups: pg['lr'] = current_lr
+            
             obs = env.reset()[0]
-            mem = {'s':[], 'at':[], 'lp':[], 'v':[], 'r':[], 'm':[]}
-            ep_reward = 0
+            done, ep_reward, last_act = False, 0, 0
+            force_select = True 
+            last_enemy_count = 99
             
-            while True:
-                # 視覺處理與安全檢查
-                screen = obs.observation.feature_screen
-                rel = screen[features.SCREEN_FEATURES.player_relative.index]
-                hp_idx = getattr(features.SCREEN_FEATURES, 'unit_hp_ratio', getattr(features.SCREEN_FEATURES, 'unit_hit_points_ratio', None)).index
-                state = np.stack([rel==1, rel==4, screen[hp_idx]/255.0, screen[features.SCREEN_FEATURES.selected.index]], axis=0)
-                state_t = torch.FloatTensor(state).unsqueeze(0).to(DEVICE)
-                
-                t_logits, s_logits, val = model(state_t)
-                
-                # Invalid Action Masking
-                mask = torch.zeros(3).to(DEVICE)
+            states, actions_taken, log_probs_list, rewards, values, masks_list, is_terminals = [], [], [], [], [], [], []
+
+            print(f"\n--- [Ep {ep} 開始] LR: {current_lr:.2e} | Best: {best_reward:.2f} ---")
+
+            while not done:
+                state_cpu = get_state(obs)
                 avail = obs.observation.available_actions
-                if 0 in avail: mask[0] = 1 # NO_OP
-                if 7 in avail: mask[1] = 1 # select_army
-                if 12 in avail: mask[2] = 1 # Attack_screen
+                units_list = obs.observation.feature_units
                 
-                prob = F.softmax(t_logits, dim=-1) * mask + 1e-9
-                dist = Categorical(prob / prob.sum())
-                a_type = dist.sample()
+                # --- 🚩 核心：無效動作遮罩 ---
+                mask = torch.zeros(6).to(device)
+                is_selected = any(u.is_selected for u in units_list if u.alliance == 1)
+
+                if force_select or not is_selected:
+                    mask[1] = 1 # 沒選人時強制 Action 1
+                else:
+                    mask[0] = 1 # No-op
+                    if 7 in avail and last_act != 1: mask[1] = 1 # 禁止連續 Action 1
+                    if 331 in avail: mask[2] = 1
+                    if 12 in avail:  mask[3] = 1 
+                    if (12 in avail or 331 in avail): mask[0] = 0 # 交戰中禁 No-op
+
+                with torch.no_grad():
+                    p, sp, mp, v = model(state_cpu.unsqueeze(0).to(device), mask.unsqueeze(0))
                 
-                if a_type == 1: act = actions.FUNCTIONS.select_army("select")
-                elif a_type == 2:
-                    s_idx = Categorical(F.softmax(s_logits, dim=-1)).sample().item()
-                    act = actions.FUNCTIONS.Attack_screen("now", [s_idx%64, s_idx//64])
-                else: act = actions.FUNCTIONS.no_op()
+                # 採樣
+                p_s = (p + 1e-12) / (p.sum() + 1e-12)
+                sp_s = (sp + 1e-12) / (sp.sum() + 1e-12)
+                dist_a, dist_s = Categorical(p_s), Categorical(sp_s)
+                act_idx, s_idx = dist_a.sample(), dist_s.sample()
+                
+                if force_select: force_select = False
+                last_act = act_idx.item()
+                target_s = [int(s_idx.item() % 64), int(s_idx.item() // 64)]
+                
+                if last_act == 1: act = actions.FunctionCall(7, [[0]])
+                elif last_act == 2: act = actions.FunctionCall(331, [[0], target_s])
+                elif last_act == 3: act = actions.FunctionCall(12, [[0], target_s])
+                else: act = actions.FunctionCall(0, [])
 
-                obs = env.step(actions=[act])[0]
-                mem['s'].append(state_t); mem['at'].append(a_type.item())
-                mem['lp'].append(dist.log_prob(a_type).unsqueeze(0)); mem['v'].append(val)
-                mem['r'].append(obs.reward); mem['m'].append(0 if obs.last() else 1)
-                ep_reward += obs.reward
-                if obs.last(): break
+                try: next_obs = env.step([act])[0]
+                except ValueError: continue
+                
+                reward = reward_tool.calculate(next_obs)
+                
+                # 🚩 觸發：敵方全滅戰報
+                curr_enemy_count = len([u for u in next_obs.observation.feature_units if u.alliance == 4])
+                if last_enemy_count > 0 and curr_enemy_count == 0:
+                    friendly_hp = sum([u.health for u in next_obs.observation.feature_units if u.alliance == 1])
+                    print(f"  🔥 [戰報] 敵方全滅！ Step: {len(states)} | Reward: {reward:+.2f} | 殘存血量: {friendly_hp}")
+                last_enemy_count = curr_enemy_count
 
-            # 計算 GAE 並存檔
-            adv, ret = compute_gae(torch.tensor(mem['r']).to(DEVICE), torch.tensor(mem['m']).to(DEVICE), 
-                                   torch.cat(mem['v']).detach().squeeze())
-            mem['adv'] = adv; mem['ret'] = ret
-            l_v, e_v = train_ppo(model, optimizer, mem)
+                states.append(state_cpu); actions_taken.append((last_act, s_idx.item()))
+                log_probs_list.append((dist_a.log_prob(act_idx) + dist_s.log_prob(s_idx)).item())
+                rewards.append(reward); values.append(v.item()); masks_list.append(mask.cpu())
+                is_terminals.append(0 if next_obs.last() else 1)
+                
+                ep_reward += reward
+                obs = next_obs
+                if next_obs.last(): done = True
 
-            save_pkg = {'ep': ep, 'model': model.state_dict(), 'opt': optimizer.state_dict(), 'r': ep_reward}
-            torch.save(save_pkg, MODEL_NEW)
-            if ep_reward >= best_r:
-                best_r = ep_reward; torch.save(save_pkg, MODEL_BEST)
-                print(f"[*] 第 {ep} 回合: 更新最佳紀錄 ({best_r})")
+            # 更新 PPO
+            with torch.no_grad():
+                next_v = model(get_state(obs).unsqueeze(0).to(device), torch.eye(6)[0].to(device).unsqueeze(0))[3].item()
+            rets, gae, v_plus = [], 0, values + [next_v]
+            for i in reversed(range(len(rewards))):
+                delta = rewards[i] + GAMMA * v_plus[i+1] * is_terminals[i] - v_plus[i]
+                gae = delta + GAMMA * GAE_LAMBDA * is_terminals[i] * gae
+                rets.insert(0, gae + v_plus[i])
             
-            writer.writerow([ep, ep_reward, f"{l_v:.4f}", f"{e_v:.4f}"]); log_f.flush()
-            print(f"Ep {ep} | Reward: {ep_reward} | Entropy: {e_v:.4f}")
+            advs = [r - v for r, v in zip(rets, values)]
+            pl, vl, tl, ent = ppo_update(model, optimizer, states, actions_taken, log_probs_list, rets, advs, masks_list, device)
 
-    finally: env.close(); log_f.close()
+            # 🚩 破紀錄輸出
+            if ep_reward > best_reward:
+                best_reward = ep_reward
+                torch.save({'epoch': ep, 'best_reward': best_reward, 'model_state': model.state_dict()}, 
+                           os.path.join(SAVE_DIR, "defeat_roaches_best.pth"))
+                print(f"⭐ [系統] 創下新高: {best_reward:.2f}")
 
-if __name__ == "__main__":
-    flags.DEFINE_string('f', '', 'kernel'); app.run(main)
+            with open(LOG_PATH, 'a', newline='') as f:
+                csv.writer(f).writerow([ep, time.strftime("%H:%M:%S"), round(ep_reward, 2), f"{pl:.6f}", f"{vl:.6f}", f"{tl:.6f}", f"{ent:.4f}", f"{current_lr:.2e}"])
+            
+            if ep % 10 == 0:
+                cleanup_old_models(SAVE_DIR, 5)
+                torch.save({'epoch': ep, 'best_reward': best_reward, 'model_state': model.state_dict(), 'optimizer_state': optimizer.state_dict()}, 
+                           os.path.join(SAVE_DIR, f"defeat_roaches_ep{ep}.pth"))
+            torch.cuda.empty_cache()
+
+    finally: env.close()
+
+if __name__ == "__main__": app.run(main)
