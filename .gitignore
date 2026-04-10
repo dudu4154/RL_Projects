@@ -17,3 +17,5 @@ __pycache__/
 
 !log/dqn_model.pth
 >>>>>>> d3106dd487adc692a187b543eddec97a1e7efb14
+dudu/log/
+*.pkl
