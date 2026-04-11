@@ -12,6 +12,7 @@ from pysc2.lib import actions, features
 import pickle
 import threading # 加上這行
 import copy
+import math
 
 import os
 os.environ["SC2PATH"] = r"D:\StarCraft II"
@@ -617,25 +618,43 @@ def main(argv):
                 # ==========================================
                 if done:
                     if current_real_count >= 5:
-                        # 公式：(剩餘時間佔總時間的比例) * 50 分
-                        time_bonus = (1.0 - (current_loop / 13440.0)) * 50.0
-                        #time_bonus：這是一個線性獎勵
-                        # 如果 AI 在第 1 幀就完成，獎金接近 50；如果等到最後 1 幀才完成，獎金接近 0。
-                        #意義：強制 AI 優化路徑。AI 會發現發呆是很昂貴的，「省下的時間 = 賺到的分數」。
-                        step_reward += (50.0 + time_bonus)
-                        print(f"✅ 任務成功！剩餘時間獎金: +{time_bonus:.1f}")
+                        current_finish_time = float(current_loop)
+
+
+                        # 2. 如果這次打破了歷史紀錄 (比最小還要小)
+                        if current_finish_time < best_finish_time:
+                            best_finish_time = current_finish_time
+                            # 給予額外的「突破獎勵」，讓模型記住這次神操作
+                            breakthrough_bonus = 0.5
+                        else:
+                            breakthrough_bonus = 0.0
+                            
+                        # 1. 算出剩餘時間比例 (0.0 ~ 1.0)
+                        # 越快完成，time_ratio 越接近 1.0
+                        time_ratio = 1.0 - (current_loop / 13440.0)
+                        
+                        # 2. 使用 Tanh 進行非線性壓縮
+                        # 我們將比例乘上 2.5，這會讓曲線在 0 附近（即任務接近失敗時）有更強的區分度
+                        # 此數值會產出一個介於 0 到 0.98 之間的獎勵
+                        tanh_bonus = math.tanh(time_ratio * 2.5)
+                        
+                        # 3. 賦予獎勵：基礎分 + 時間獎金，總和會控制在 1.0 以內
+                        # 這樣就不需要後續的 / 160.0 縮放了
+                        step_reward += (0.5 + (0.5 * tanh_bonus)) 
+                        
+                        print(f"✅ 任務成功！時間效率獎勵 (Tanh): {tanh_bonus:.4f}，本幀總分: {step_reward:.4f}")
                     else:
-                        # 失敗結算：嚴厲倒扣，不給任何安慰分。
-                        # 嚴厲邏輯：沒產滿就是失敗，強制 AI 去探索「成功」的那條路。
-                        step_reward -= 20.0
-                        print(f"❌ 任務失敗：效率不足或時間耗盡，最終懲罰 -20")
+                        # 失敗結算：使用 Tanh 的負向區間 (-1)
+                        # 強制 AI 了解「沒產滿就是絕對失敗」
+                        step_reward -= 0.8
+                        print(f"❌ 任務失敗：最終懲罰 (Tanh-based): -0.8")
 
                 # ==========================================
                 # ⚠️ 第二步：分數壓縮 (Normalization)
                 # ==========================================
                 # 💡 總分上限現在約為 100~110 (科技加分 + 5隻產量 + 成功獎金 + 時間獎金)
                 # 除以 160 可以讓 reward 完美落在1~-1附近，這是 DQN 最喜歡的區間。
-                scaled_reward = step_reward / 160.0
+                scaled_reward = step_reward
                 episode_reward += scaled_reward
 
                 # 🚀 加入這行測試！
