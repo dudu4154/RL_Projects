@@ -186,6 +186,7 @@ def get_state_vector(obs, current_block, target_project_id, last_action_id, last
 # 🎮 訓練主程式
 # =========================================================
 def main(argv):
+    
     del argv
     state_size = 17  
     IS_TRAINING = True
@@ -406,7 +407,19 @@ def main(argv):
     ) as env:
         
         current_session_file = os.path.join(log_dir, f"dqn_training_log_{int(time.time())}.csv")
-        
+
+
+        best_record = [13440.0] 
+
+        # 如果你有舊的紀錄檔就讀取，沒有就跳過
+        best_time_path = "best_time.txt" 
+        if os.path.exists(best_time_path):
+            with open(best_time_path, "r") as f:
+                best_record[0] = float(f.read().strip())
+            print(f"📖 載入歷史紀錄：目前最短完成時間為 {best_record[0]} 幀")
+                # --- 修正 1：初始化歷史最低時間紀錄 ---
+
+
         for ep in range(10000):
 
             agent = ProductionAI()
@@ -448,7 +461,9 @@ def main(argv):
             
 
             while True:
+                
                 step_reward = 0.0
+            
                 
                 
                 
@@ -618,31 +633,30 @@ def main(argv):
                 # ==========================================
                 if done:
                     if current_real_count >= 5:
+                        # 1. 取得這局花費的時間
                         current_finish_time = float(current_loop)
-
-
-                        # 2. 如果這次打破了歷史紀錄 (比最小還要小)
-                        if current_finish_time < best_finish_time:
-                            best_finish_time = current_finish_time
-                            # 給予額外的「突破獎勵」，讓模型記住這次神操作
-                            breakthrough_bonus = 0.5
+                        
+                        # 2. 計算時間效率比例 (0~1)
+                        time_ratio = 1.0 - (current_finish_time / 13440.0)
+                        
+                        # 3. Tanh 壓縮分數
+                        tanh_reward = math.tanh(time_ratio * 2.5)
+                        
+                        # 4. 判斷是否打破紀錄 (使用 best_record[0])
+                        if current_finish_time < best_record[0]:
+                            best_record[0] = current_finish_time
+                            # 自動存檔，防止程式崩潰
+                            with open(best_time_path, "w") as f:
+                                f.write(str(best_record[0]))
+                            print(f"🔥 新紀錄！打破歷史最短時間: {best_record[0]} 幀")
+                            # 給予破紀錄獎勵
+                            step_reward = (0.5 + 0.5 * tanh_reward) + 0.2
                         else:
-                            breakthrough_bonus = 0.0
-                            
-                        # 1. 算出剩餘時間比例 (0.0 ~ 1.0)
-                        # 越快完成，time_ratio 越接近 1.0
-                        time_ratio = 1.0 - (current_loop / 13440.0)
+                            # 沒破紀錄，但依舊有成功的基礎分
+                            step_reward = (0.5 + 0.5 * tanh_reward)
                         
-                        # 2. 使用 Tanh 進行非線性壓縮
-                        # 我們將比例乘上 2.5，這會讓曲線在 0 附近（即任務接近失敗時）有更強的區分度
-                        # 此數值會產出一個介於 0 到 0.98 之間的獎勵
-                        tanh_bonus = math.tanh(time_ratio * 2.5)
-                        
-                        # 3. 賦予獎勵：基礎分 + 時間獎金，總和會控制在 1.0 以內
-                        # 這樣就不需要後續的 / 160.0 縮放了
-                        step_reward += (0.5 + (0.5 * tanh_bonus)) 
-                        
-                        print(f"✅ 任務成功！時間效率獎勵 (Tanh): {tanh_bonus:.4f}，本幀總分: {step_reward:.4f}")
+                        print(f"✅ 任務成功！花費時間: {current_finish_time}，本幀獎勵: {step_reward:.4f}")
+                    
                     else:
                         # 失敗結算：使用 Tanh 的負向區間 (-1)
                         # 強制 AI 了解「沒產滿就是絕對失敗」
