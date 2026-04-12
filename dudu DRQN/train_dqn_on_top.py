@@ -456,7 +456,7 @@ def main(argv):
 
 
             episode_reward = 0.0  
-            
+            final_reward = 0.0
             achieved_milestones = set()
             
 
@@ -595,100 +595,134 @@ def main(argv):
                 # 🏆 穩定版全局計分系統 (Dense Reward Shaping)
                 # ==========================================
                 
-                
-                
+                # ==========================================
+            # 🏆 Reward 計算區塊（教授建議簡化版）
+            # 設計理念：
+            #   - 所有 reward 最終透過 tanh 壓縮至 [-1, +1]
+            #   - 不使用手動除法，讓數學函數自然做 normalization
+            #   - 過程獎勵（里程碑）只給方向，終局獎勵才是真正的學習訊號
+            # ==========================================
 
-                # 1.科技樹里程碑 (麵包屑導航：數值極小化，只給方向不給刷分空間)
-                # 嚴厲邏輯：這些只是過程，不是目標。分數調低防止 AI 卡在「蓋完建築就發呆」。
-                #邏輯：當畫面上出現補給站（Depot）、兵營（Barracks）、瓦斯廠（Refinery）]或科技室（Techlab）時，給予 1.0 ~ 3.0 的微量加分。
+                step_reward = 0.0  # 每一幀開始時，先將本幀獎勵歸零
+
+                # ==========================================
+                # 第一步：科技樹里程碑獎勵（過程引導）
+                # 設計理念：
+                #   這些獎勵只是「麵包屑」，告訴 AI 科技樹的正確方向。
+                #   數值刻意調小（0.05~0.15），避免 AI 學到「一直蓋建築刷里程碑」就發呆不產兵。
+                #   用 set 確保每個里程碑整局只觸發一次，不會重複給分。
+                # ==========================================
                 if "depot" not in achieved_milestones and current_depots >= 1:
-                    step_reward += 1.0; achieved_milestones.add("depot")
-                    print(1)
+                    step_reward += 0.05                      # 補給站是第一步，給最小的引導分
+                    achieved_milestones.add("depot")         # 標記為已達成，後續不再重複給分
+                    print("補給站里程碑 +0.05")
+
                 if "barracks" not in achieved_milestones and current_barracks >= 1:
-                    step_reward += 2.0; achieved_milestones.add("barracks")
-                    print(2)
+                    step_reward += 0.10                      # 兵營是核心建築，略高於補給站
+                    achieved_milestones.add("barracks")
+                    print("兵營里程碑 +0.10")
+
                 if "refinery" not in achieved_milestones and current_refineries >= 1:
-                    step_reward += 1.5; achieved_milestones.add("refinery")
-                    print(3)
+                    step_reward += 0.05                      # 瓦斯廠和補給站同級，都是輔助建築
+                    achieved_milestones.add("refinery")
+                    print("瓦斯廠里程碑 +0.05")
+
                 if "techlab" not in achieved_milestones and current_techlabs >= 1:
-                    step_reward += 3.0; achieved_milestones.add("techlab")
-                    print(4)
+                    step_reward += 0.15                      # 科技室是掠奪者的直接前置，給最高引導分
+                    achieved_milestones.add("techlab")
+                    print("科技室里程碑 +0.15")
 
-
-                # 2.核心產量獎勵 (掠奪者 Marauder)
+                # ==========================================
+                # 第二步：核心產量獎勵（掠奪者 Marauder）
+                # 設計理念：
+                #   每生出一隻掠奪者給 +0.15。
+                #   5 隻全部生完最多累積 +0.75，加上里程碑約 +1.1，
+                #   tanh(1.1) ≈ 0.8，自然壓縮在合理範圍內。
+                #   用 last_target_count 追蹤數量變化，確保只在「新增」時給分，不會重複。
+                # ==========================================
                 if current_real_count > getattr(agent, 'last_target_count', 0):
-                    agent.last_target_count = current_real_count
-                    # 設計理念：我們不使用原本的 1000 分，而是改用 10 分。
-                    # 這能讓神經網路在更新權重時更穩定，不會因為一次巨大的脈衝訊號導致模型參數「飛掉」。
-                    step_reward += 10.0
+                    agent.last_target_count = current_real_count  # 更新追蹤基準
+                    step_reward += 0.15
                     print(f"🎯 掠奪者產出！目前進度: {current_real_count}/5")
 
-                # 3.終局判定：由「幀數」主導的勝負邏輯
+                # ==========================================
+                # 第三步：終局判定
+                # 三個結束條件：
+                #   1. 遊戲引擎通知結束（next_obs.last()）
+                #   2. 超過時間上限 13440 幀（約 10 分鐘）
+                #   3. 已達成目標：生出 5 隻掠奪者
+                # ==========================================
                 current_loop = int(next_obs.observation.game_loop[0])
-                # 定義回合結束的三個條件：遊戲結束、時間耗盡（13440 幀）、或達成 5 隻目標。
                 done = next_obs.last() or current_loop >= 13440 or current_real_count >= 5
 
                 # ==========================================
-                # ⚠️ 第一步：執行高壓的時間效率結算
+                # 第四步：終局結算（只在回合結束時執行）
+                # 設計理念（教授建議）：
+                #   成功 → 用 tanh 把完成時間轉換成獎勵，越快越接近 +1，剛好達標接近 0
+                #   失敗 → 直接給 -1.0，強制覆蓋本幀所有分數，讓模型清楚感知「沒達標 = 完全失敗」
                 # ==========================================
                 if done:
                     if current_real_count >= 5:
-                        # 1. 取得這局花費的時間
-                        current_finish_time = float(current_loop)
-                        
-                        # 2. 計算時間效率比例 (0~1)
-                        time_ratio = 1.0 - (current_finish_time / 13440.0)
-                        
-                        # 3. Tanh 壓縮分數
-                        tanh_reward = math.tanh(time_ratio * 2.5)
-                        
-                        # 4. 判斷是否打破紀錄 (使用 best_record[0])
-                        if current_finish_time < best_record[0]:
-                            best_record[0] = current_finish_time
-                            # 自動存檔，防止程式崩潰
+                        # 計算時間效率比例
+                        # time_ratio = 1.0 代表瞬間完成（不可能），= 0.0 代表剛好在 deadline 完成
+                        time_ratio = 1.0 - (float(current_loop) / 13440.0)
+
+                        # 用 tanh 將時間效率轉為終局獎勵
+                        # 乘以 3.0 是為了拉大中間段的梯度差異，讓「快一點」和「慢一點」的分數差更明顯
+                        # 例如：time_ratio=0.5 → tanh(1.5) ≈ 0.905，time_ratio=0.2 → tanh(0.6) ≈ 0.537
+                        terminal_reward = math.tanh(time_ratio * 3.0)
+                        step_reward += terminal_reward
+
+                        # 如果這局打破歷史最短完成時間，自動存檔
+                        if float(current_loop) < best_record[0]:
+                            best_record[0] = float(current_loop)
                             with open(best_time_path, "w") as f:
                                 f.write(str(best_record[0]))
-                            print(f"🔥 新紀錄！打破歷史最短時間: {best_record[0]} 幀")
-                            # 給予破紀錄獎勵
-                            step_reward = (0.5 + 0.5 * tanh_reward) + 0.2
-                        else:
-                            # 沒破紀錄，但依舊有成功的基礎分
-                            step_reward = (0.5 + 0.5 * tanh_reward)
-                        
-                        print(f"✅ 任務成功！花費時間: {current_finish_time}，本幀獎勵: {step_reward:.4f}")
-                    
+                            print(f"🔥 新紀錄！最短完成時間: {best_record[0]} 幀")
+
+                        print(f"✅ 任務成功！時間: {current_loop}，終局獎勵: {terminal_reward:.4f}")
+
                     else:
-                        # 失敗結算：使用 Tanh 的負向區間 (-1)
-                        # 強制 AI 了解「沒產滿就是絕對失敗」
-                        step_reward -= 0.8
-                        print(f"❌ 任務失敗：最終懲罰 (Tanh-based): -0.8")
+                        progress_ratio = current_real_count / 5.0  # 0隻=0.0, 4隻=0.8
+                        step_reward = -1.0 + progress_ratio * 0.5  # 0隻=-1.0, 4隻=-0.6
+                        print(f"❌ 任務失敗：進度 {current_real_count}/5，懲罰={step_reward:.4f}")
 
                 # ==========================================
-                # ⚠️ 第二步：分數壓縮 (Normalization)
+                # 第五步：tanh 壓縮（核心）
+                # 設計理念：
+                #   不論上面累積了多少原始分數，最終都透過 tanh 壓縮到 [-1, +1]。
+                #   這取代了舊版的「除以 160」，不需要猜魔法數字，數學上保證有界。
+                #   scaled_reward 才是真正存入記憶庫、送進神經網路訓練的值。
                 # ==========================================
-                # 💡 總分上限現在約為 100~110 (科技加分 + 5隻產量 + 成功獎金 + 時間獎金)
-                # 除以 160 可以讓 reward 完美落在1~-1附近，這是 DQN 最喜歡的區間。
-                scaled_reward = step_reward
+                scaled_reward = math.tanh(step_reward)
                 episode_reward += scaled_reward
+                #episode_reward += scaled_reward  # 累計這局的總分（用於 CSV 記錄與排行榜）
+                if done:
+                    final_reward = scaled_reward  # 只取終局幀，天然在[-1,+1]，給教授看、寫CSV
 
-                # 🚀 加入這行測試！
+            
+            
                 if step_reward != 0:
-                    print(f"DEBUG: 這一幀加了 {step_reward} 分，累計總分: {episode_reward}")
+                    print(f"DEBUG: raw={step_reward:.4f}, tanh後={scaled_reward:.4f}, 累計={episode_reward:.4f}")
 
+                # ==========================================
+                # 第六步：取得下一幀狀態，並打包成訓練用的 Transition
+                # ==========================================
                 next_time_loop = int(next_obs.observation.game_loop[0])
                 next_state = get_state_vector(
-                    next_obs, 
-                    getattr(agent, 'active_parameter', 1), 
-                    18, 
-                    a_id, 
-                    current_action_success, 
+                    next_obs,
+                    getattr(agent, 'active_parameter', 1),
+                    18,
+                    a_id,
+                    current_action_success,
                     next_time_loop
                 )
+
+                # 將這一幀的 (狀態, 動作, 獎勵, 下一狀態, 結束旗標, LSTM記憶) 打包存入 N-Step 緩衝區
                 current_transition = (state, action_index, scaled_reward, next_state, done, hidden_state, next_hidden_state, next_allowed_indices)
                 n_step_buffer.append(current_transition)
-                
 
-
+                # 更新觀測值與狀態，準備進入下一幀
                 obs = next_obs
                 state = next_state
                 hidden_state = (next_hidden_state[0].detach(), next_hidden_state[1].detach())
@@ -822,13 +856,16 @@ def main(argv):
                             if key == "techlab" and exists: final_t_count = 1
                     
                     # 4. 寫入 CSV 紀錄
-                    print(f"!!! 即將寫入 CSV 的分數是: {episode_reward} (型別: {type(episode_reward)})")
+                    # 只壓縮用於顯示的分數，不影響任何訓練邏輯
+                    
+
+                    print(f"!!! 即將寫入 CSV 的分數是: {final_reward} (型別: {type(final_reward)})")
                     #logger.log_episode(ep + 1, "掠奪者任務", epsilon, float(episode_reward), current_loop, current_real_count, marine_count)
                     #log_file = f"d:/RL_Projects/dudu DRQN/log/dqn_training_log_{int(time.time())}.csv"
                     with open(current_session_file, "a", encoding="utf-8") as f:
-                        line = f"{ep+1},掠奪者任務,{epsilon:.3f},{episode_reward:.4f},{current_loop},{current_real_count},{marine_count}\n"
+                        line = f"{ep+1},掠奪者任務,{epsilon:.3f},{final_reward:.4f},{current_loop},{current_real_count},{marine_count}\n"
                         f.write(line)
-                    print(f"✅ 已手動強制寫入 CSV: {episode_reward:.4f}")
+                    print(f"✅ 已手動強制寫入 CSV: {final_reward:.4f}")
                     break # ✨ 記得加上 break 跳出 while 迴圈
 
                 state = next_state
