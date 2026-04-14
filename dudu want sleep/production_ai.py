@@ -66,6 +66,7 @@ class ProductionAI:
         self.base_location_code = 0
         self.locked_target = None
         self.cc_is_bound = False  # 追蹤主堡是否已編隊
+        self.is_combat_mode = False
 
     #檢查當前選取狀態中是否包含工兵。
     def _is_scv_selected(self, obs):
@@ -926,7 +927,7 @@ class ProductionAI:
         elif action_id ==44:
             return actions.FUNCTIONS.no_op()
         
-        # [Action 45] 主堡編隊 若以編隊移動視角
+# [Action 45] 主堡編隊 若以編隊移動視角
         elif action_id == 45:
             # 1. 檢查相關動作是否可用
             if actions.FUNCTIONS.select_control_group.id not in available:
@@ -1080,159 +1081,246 @@ class ProductionAI:
 
             return actions.FUNCTIONS.no_op()
         
-        # [Action 47] 戰術小隊突擊：操控編隊 2 移動與攻擊 (三步組合技)
+        # [Action 47] 操控編隊2 A-move 到指定區域（穩定版）
         elif action_id == 47:
             step = self.lock_timer
-            
-            # --- 🛡️ 安全防呆檢查：確認編隊 2 是否真的有兵 ---
+
             try:
-                # 取得熱鍵 2 的單位數量
                 group_2_count = obs.observation.control_groups[2][1]
             except:
                 group_2_count = 0
-                
-            # 如果編隊 2 根本沒兵，立刻放棄這個動作，並解鎖大腦！
+
             if group_2_count == 0:
                 self.locked_action = None
                 self.lock_timer = 0
+                self.locked_target = None
                 return actions.FUNCTIONS.no_op()
 
-            # --- 網格座標計算 (基於 1~64 的 param) ---
-            # 因為 locked_action 啟動時 parameter 不會更新，這裡的三步共用同一個坐標
+            # 用 parameter 決定目標區域
             p_idx = max(0, self.active_parameter - 1) % 64
             r, c = p_idx // 8, p_idx % 8
-            
-            # 1. 小地圖座標 (64x64)
-            target_minimap = (np.clip(int((c + 0.5) * 8), 0, 63), np.clip(int((r + 0.5) * 8), 0, 63))
-            
-            # 2. 螢幕座標 (84x84)
-            target_screen = (np.clip(int((c + 0.5) * 10.5), 0, 83), np.clip(int((r + 0.5) * 10.5), 0, 83))
 
-            # ==========================================
-            # Step 0: 呼叫編隊 2 (Recall)
-            # ==========================================
+            target_minimap = (
+                np.clip(int((c + 0.5) * 8), 0, 63),
+                np.clip(int((r + 0.5) * 8), 0, 63)
+            )
+
+            target_screen = (
+                np.clip(int((c + 0.5) * 10.5), 0, 83),
+                np.clip(int((r + 0.5) * 10.5), 0, 83)
+            )
+
             if step == 0:
-                if actions.FUNCTIONS.select_control_group.id in available:
-                    self.locked_action = 47 # 繼續鎖定，下一幀自動進 Step 1
-                    return actions.FUNCTIONS.select_control_group("recall", 2)
-                
-                # 如果熱鍵 2 不能按，提早放棄，解除鎖定
-                self.locked_action = None
+                self.locked_action = 47
+                self.locked_target = {
+                    "minimap": target_minimap,
+                    "screen": target_screen
+                }
                 self.lock_timer = 0
+
+                if actions.FUNCTIONS.select_control_group.id in available:
+                    return actions.FUNCTIONS.select_control_group("recall", 2)
                 return actions.FUNCTIONS.no_op()
-                
-            # ==========================================
-            # Step 1: 移動視角 (Camera)
-            # ==========================================
+
             elif step == 1:
                 if actions.FUNCTIONS.move_camera.id in available:
-                    self.locked_action = 47 # 繼續鎖定，下一幀自動進 Step 2
-                    return actions.FUNCTIONS.move_camera(target_minimap) 
-                
-                # 若無法動視角，解除鎖定防卡死
-                self.locked_action = None
-                self.lock_timer = 0
+                    return actions.FUNCTIONS.move_camera(self.locked_target["minimap"])
                 return actions.FUNCTIONS.no_op()
-                
-            # ==========================================
-            # Step 2: 螢幕攻擊/移動 (Attack/Move)
-            # ==========================================
+
             elif step == 2:
-                # 這是最後一步，任務完成，徹底解除鎖定，讓大腦重新接管！
+                # 優先 A-move
+                if actions.FUNCTIONS.Attack_screen.id in available:
+                    self.locked_action = None
+                    self.lock_timer = 0
+                    self.locked_target = None
+                    return actions.FUNCTIONS.Attack_screen("now", self.locked_target["screen"])
+
+                # 備案：普通移動
+                if actions.FUNCTIONS.Move_screen.id in available:
+                    self.locked_action = None
+                    self.lock_timer = 0
+                    self.locked_target = None
+                    return actions.FUNCTIONS.Move_screen("now", self.locked_target["screen"])
+
                 self.locked_action = None
                 self.lock_timer = 0
-                
-                # 優先使用 A 過去 (Attack_screen)，遇到敵人自動開火
-                if actions.FUNCTIONS.Attack_screen.id in available:
-                    return actions.FUNCTIONS.Attack_screen("now", target_screen)
-                # 備案：如果不能攻擊，至少右鍵移動過去
-                elif actions.FUNCTIONS.Move_screen.id in available:
-                    return actions.FUNCTIONS.Move_screen("now", target_screen)
-                    
+                self.locked_target = None
+                return actions.FUNCTIONS.no_op()
+
+            self.locked_action = None
+            self.lock_timer = 0
+            self.locked_target = None
             return actions.FUNCTIONS.no_op()
         
-        # [Action 48] 戰術集火：鎖定並獵殺敵方工兵 (SCV, Drone, Probe)
+        # [Action 48] 編隊2 鎖定畫面中的敵方單位（集火穩定版）
         elif action_id == 48:
             step = self.lock_timer
-            
-            # --- 🛡️ 安全防呆檢查：確認編隊 2 是否有兵 ---
+
             try:
                 group_2_count = obs.observation.control_groups[2][1]
             except:
                 group_2_count = 0
-                
+
             if group_2_count == 0:
                 self.locked_action = None
                 self.lock_timer = 0
+                self.locked_target = None
                 return actions.FUNCTIONS.no_op()
 
-            # --- 網格座標計算 (基於 1~64 的 param) ---
-            # 讓大腦決定要去哪裡抓人
+            # 用 parameter 決定要看的區域
             p_idx = max(0, self.active_parameter - 1) % 64
             r, c = p_idx // 8, p_idx % 8
-            
-            # 1. 小地圖座標 (64x64) - 決定視角去哪
-            target_minimap = (np.clip(int((c + 0.5) * 8), 0, 63), np.clip(int((r + 0.5) * 8), 0, 63))
-            
-            # 2. 螢幕備用座標 (84x84) - 萬一沒看到工兵的備用攻擊點
-            target_screen_fallback = (np.clip(int((c + 0.5) * 10.5), 0, 83), np.clip(int((r + 0.5) * 10.5), 0, 83))
 
-            # ==========================================
-            # Step 0: 呼叫編隊 2 (Recall)
-            # ==========================================
+            target_minimap = (
+                np.clip(int((c + 0.5) * 8), 0, 63),
+                np.clip(int((r + 0.5) * 8), 0, 63)
+            )
+
+            fallback_screen = (
+                np.clip(int((c + 0.5) * 10.5), 0, 83),
+                np.clip(int((r + 0.5) * 10.5), 0, 83)
+            )
+
             if step == 0:
+                self.locked_action = 48
+                self.locked_target = {
+                    "minimap": target_minimap,
+                    "fallback": fallback_screen
+                }
+                self.lock_timer = 0
+
                 if actions.FUNCTIONS.select_control_group.id in available:
-                    self.locked_action = 48
-                    self.lock_timer = 1
                     return actions.FUNCTIONS.select_control_group("recall", 2)
-                
-                self.locked_action = None
                 return actions.FUNCTIONS.no_op()
-                
-            # ==========================================
-            # Step 1: 移動視角 (Camera)
-            # ==========================================
+
             elif step == 1:
                 if actions.FUNCTIONS.move_camera.id in available:
-                    self.locked_action = 48
-                    self.lock_timer = 2
-                    return actions.FUNCTIONS.move_camera(target_minimap) 
-                
+                    return actions.FUNCTIONS.move_camera(self.locked_target["minimap"])
+                return actions.FUNCTIONS.no_op()
+
+            elif step == 2:
+                player_relative = obs.observation.feature_screen[
+                    features.SCREEN_FEATURES.player_relative.index
+                ]
+
+                # 先找敵方戰鬥單位，再找工兵
+                enemy_mask = (player_relative == 4)
+                ey, ex = enemy_mask.nonzero()
+
+                # 優先抓敵方工兵
+                worker_mask = (player_relative == 4) & (
+                    (unit_type == 45) | (unit_type == 84) | (unit_type == 104)
+                )
+                wy, wx = worker_mask.nonzero()
+
+                # 若有敵方工兵，優先集火工兵
+                if wx.any():
+                    target = (int(wx[0]), int(wy[0]))
+                    if actions.FUNCTIONS.Attack_screen.id in available:
+                        self.locked_action = None
+                        self.lock_timer = 0
+                        self.locked_target = None
+                        return actions.FUNCTIONS.Attack_screen("now", target)
+
+                # 沒工兵就打最近敵軍
+                if ex.any():
+                    center = np.array([42, 42])
+                    pts = np.column_stack((ex, ey))
+                    dists = np.sum((pts - center) ** 2, axis=1)
+                    idx = int(np.argmin(dists))
+                    target = (int(pts[idx][0]), int(pts[idx][1]))
+
+                    if actions.FUNCTIONS.Attack_screen.id in available:
+                        self.locked_action = None
+                        self.lock_timer = 0
+                        self.locked_target = None
+                        return actions.FUNCTIONS.Attack_screen("now", target)
+
+                # 找不到敵人就 A 過去那格
+                if actions.FUNCTIONS.Attack_screen.id in available:
+                    self.locked_action = None
+                    self.lock_timer = 0
+                    self.locked_target = None
+                    return actions.FUNCTIONS.Attack_screen("now", self.locked_target["fallback"])
+
+                if actions.FUNCTIONS.Move_screen.id in available:
+                    self.locked_action = None
+                    self.lock_timer = 0
+                    self.locked_target = None
+                    return actions.FUNCTIONS.Move_screen("now", self.locked_target["fallback"])
+
+                self.locked_action = None
+                self.lock_timer = 0
+                self.locked_target = None
+                return actions.FUNCTIONS.no_op()
+
+            self.locked_action = None
+            self.lock_timer = 0
+            self.locked_target = None
+            return actions.FUNCTIONS.no_op()
+        
+        # [Action 49] 蓋二礦 (致敬 Action 1 完美條件判斷版)
+        elif action_id == 49:
+            # 1. 礦不夠，直接放棄
+            if player.minerals < 400:
                 self.locked_action = None
                 self.lock_timer = 0
                 return actions.FUNCTIONS.no_op()
-                
-            # ==========================================
-            # Step 2: 尋找敵方工兵並集火 (Attack)
-            # ==========================================
-            elif step == 2:
+
+            # 2. 已有二礦就不做
+            cc_count = 0
+            for cid in [COMMAND_CENTER_ID, ORBITAL_COMMAND_ID, PLANETARY_FORTRESS_ID]:
+                cc_count += len(self._find_units_centers(unit_type, cid))
+            if cc_count >= 2:
                 self.locked_action = None
                 self.lock_timer = 0
+                return actions.FUNCTIONS.no_op()
+
+            # 3. 動態計算目標座標
+            p_idx = max(0, self.active_parameter - 1) % 64
+            r, c = p_idx // 8, p_idx % 8
+            expand_screen = (
+                np.clip(int((c + 0.5) * 10.5), 0, 83),
+                np.clip(int((r + 0.5) * 10.5), 0, 83)
+            )
+            expand_minimap = (25, 50) if self.base_location_code == 1 else (48, 28)
+
+            # ==========================================
+            # 🧠 條件判斷狀態機 (採用 Action 1 的神級邏輯)
+            # ==========================================
+
+            # A. 終極目標：按鈕出現了，直接蓋下去！(最高優先級)
+            if actions.FUNCTIONS.Build_CommandCenter_screen.id in available:
+                self.locked_action = None 
+                self.lock_timer = 0
+                print(f"🏠 [系統] 遠端下達二礦建造指令！目標網格: {p_idx}")
+                return actions.FUNCTIONS.Build_CommandCenter_screen("now", expand_screen)
+
+            # B. 過程狀態：如果已經成功選中 SCV 了
+            if self._is_scv_selected(obs):
+                self.locked_action = 49
                 
-                # 取得畫面上的陣營資訊 (4 代表敵軍)
-                player_relative = obs.observation.feature_screen[features.SCREEN_FEATURES.player_relative.index]
+                # 為了避免每幀都在切換視角，導致 UI 一直閃爍出不來
+                # 我們利用 lock_timer == 1 當作「剛選中工兵的第一幀」，只在這時發送一次切視角指令
+                if self.lock_timer == 1 and actions.FUNCTIONS.move_camera.id in available:
+                    return actions.FUNCTIONS.move_camera(expand_minimap)
                 
-                # 尋找敵方工兵！SCV=45, 星海探測機(Probe)=84, 工蟲(Drone)=104
-                enemy_workers_mask = (player_relative == 4) & ((unit_type == 45) | (unit_type == 84) | (unit_type == 104))
-                enemy_y, enemy_x = enemy_workers_mask.nonzero()
-                
-                # 情況 A：畫面上真的有敵方工兵！
-                if enemy_x.any():
-                    # 鎖定第一隻看到的工兵
-                    target_screen = (enemy_x[0], enemy_y[0])
-                    if actions.FUNCTIONS.Attack_screen.id in available:
-                        print(f"🎯 [系統] 發現敵方工兵！執行集火指令，座標: {target_screen}")
-                        return actions.FUNCTIONS.Attack_screen("now", target_screen)
-                
-                # 情況 B：畫面上沒看到工兵 (大腦猜錯位置，或是工兵跑了)
-                else:
-                    # 作為備案，直接往大腦指定的網格中心點 A 過去
-                    if actions.FUNCTIONS.Attack_screen.id in available:
-                        return actions.FUNCTIONS.Attack_screen("now", target_screen_fallback)
-                    elif actions.FUNCTIONS.Move_screen.id in available:
-                        return actions.FUNCTIONS.Move_screen("now", target_screen_fallback)
-                    
+                # 視角切過去後，就跟 Action 1 一樣：原地發呆，靜止等待按鈕加載！
+                return actions.FUNCTIONS.no_op()
+
+            # C. 起始狀態：還沒選到人
+            self.locked_action = 49 
+            self.lock_timer = 0 # 確保沒選到人之前，計時器被凍結，絕對不浪費 6 幀的扣打！
+            return self._select_scv_prioritized(obs, unit_type, available)
+        #切換狀態
+        elif action_id == 50:
+            self.locked_action = None
+            self.lock_timer = 0
+            self.is_combat_mode = not self.is_combat_mode
+            mode_str = "⚔️ 戰鬥模式" if self.is_combat_mode else "🏠 生產模式"
+            print(f"🔄 [指揮官] AI 主動切換意識狀態！目前進入: {mode_str}")
             return actions.FUNCTIONS.no_op()
+        
         return actions.FUNCTIONS.no_op()
         
     # --- 內部輔助函式 ---
@@ -1386,7 +1474,7 @@ def main(argv):
             print("--- 啟動新對局 ---")
             obs_list = env.reset()
             while True:
-                action_id = random.choice([1,2,11,18,34,41,42,46,47,48])#random.randint(1,2,11,18,34,41,42)#45 #1
+                action_id = random.choice([41, 44, 49])#1,2,11,18,34,41,42,46,47,48#random.randint(1,2,11,18,34,41,42) #1
                 param = random.randint(1, 64)#1# # 網格限制 1-64
                 
                 sc2_action = agent.get_action(obs_list[0], action_id, parameter=param)

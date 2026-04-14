@@ -188,7 +188,8 @@ def main(argv):
     del argv
     state_size = 17  
     IS_TRAINING = True
-    VALID_ACTIONS = [1, 2, 11, 14, 16, 18, 34, 41, 42, 44, 45]
+    # 確保清單包含生產、戰鬥與切換(50)
+    VALID_ACTIONS = [1, 2, 11, 14, 16, 18, 34, 41, 42, 44, 45, 46, 47, 48, 50]
     action_size = len(VALID_ACTIONS)
     batch_size = 64  # ✨ 新增：每次訓練抓取的樣本數
     train_step_counter = 0
@@ -242,34 +243,34 @@ def main(argv):
 
     epsilon = 1.00; epsilon_decay = 0.998; gamma = 0.998
 
-    def get_action_mask(target_obs):
-        """ 根據當前畫面狀態，回傳合法的 Action 索引列表 """
+    def get_action_mask(target_obs, agent):
         player = target_obs.observation.player
         s_unit = target_obs.observation.feature_screen.unit_type
         s_player = target_obs.observation.feature_screen.player_relative
         
+        # 🚦 根據 AI 當前的意識狀態給予菜單
+        if agent.is_combat_mode:
+            allowed_acts = [44, 45, 46, 47, 48, 50]
+        else:
+            allowed_acts = [1, 2, 11, 14, 16, 18, 34, 41, 42, 44, 45, 50]
+
         barracks = int(np.round(np.sum((s_unit == 21) & (s_player == 1)) / 137.0))
         refineries = int(np.round(np.sum((s_unit == 20) & (s_player == 1)) / 97.0))
         techlabs = int(np.round(np.sum((s_unit == 37) & (s_player == 1)) / 85.0))
         depots = int(np.round(np.sum((s_unit == 19) & (s_player == 1)) / 69.0))
         
-        # 👉 修正 1：移除 44 (發呆)，不准 AI 躺平
-        allowed_acts = [1, 2, 11, 14, 16, 18, 34, 41, 42, 45]
         supply_surplus = float(player.food_cap) - float(player.food_used)
         minerals = float(player.minerals)
         vespene = float(player.vespene)
         
-        # --- 套用防呆規則 ---
+        # --- 🛡️ 基礎營運防呆 ---
         if (supply_surplus >= 16 or depots >= 3) and 1 in allowed_acts: allowed_acts.remove(1)
         if float(player.food_workers) >= 22 and 14 in allowed_acts: allowed_acts.remove(14)
-        
-        # 👉 修正 2：兵營只要有 2 座就夠了，禁止再蓋，避免卡建築網格
         if barracks >= 2 and 2 in allowed_acts: allowed_acts.remove(2)
         if depots == 0 and 2 in allowed_acts: allowed_acts.remove(2)
             
         if barracks == 0:
             if 11 in allowed_acts: allowed_acts.remove(11)
-            # 👉 移除 44 的連帶修改
             for act in [16, 18, 34]: 
                 if act in allowed_acts: allowed_acts.remove(act)
                 
@@ -277,11 +278,7 @@ def main(argv):
         if refineries >= 1 and 11 in allowed_acts: allowed_acts.remove(11)
         has_geyser = np.any(s_unit == 342) or np.any(s_unit == 341)
         if not has_geyser and 11 in allowed_acts: allowed_acts.remove(11)
-        if refineries == 0 and 42 in allowed_acts: allowed_acts.remove(42)
-        
-        # 👉 修正 3：如果瓦斯已經大於 150，禁止再瘋狂派兵去採瓦斯 (截斷 Action 42 的無限迴圈)
-        if vespene >= 150 and 42 in allowed_acts: allowed_acts.remove(42)
-            
+        if (refineries == 0 or vespene >= 150) and 42 in allowed_acts: allowed_acts.remove(42)
         if player.idle_worker_count == 0 and 41 in allowed_acts: allowed_acts.remove(41)
         
         if supply_surplus < 1:
@@ -297,14 +294,14 @@ def main(argv):
             for act in [1, 18]: 
                 if act in allowed_acts: allowed_acts.remove(act)
         if minerals < 150 and 2 in allowed_acts: allowed_acts.remove(2)
-        
         if vespene < 25 and 18 in allowed_acts: allowed_acts.remove(18)
         if vespene < 50 and 34 in allowed_acts: allowed_acts.remove(34)
-        # 🛡️ 正確位置在 return 之前
+
+        # 保底機制
         if not allowed_acts:
             allowed_acts = [44] 
-        return [VALID_ACTIONS.index(act) for act in allowed_acts]
-        # 🛡️ 保底機制：如果所有動作都被過濾掉了，強制保留「發呆」
+            
+        return [VALID_ACTIONS.index(act) for act in allowed_acts if act in VALID_ACTIONS]
         
 
     def train_model():
@@ -484,42 +481,58 @@ def main(argv):
                 # 👇 新增：計算補給站數量 (防呆用)
                 depot_pixels = np.sum((s_unit == 19) & (s_player == 1))
                 current_depots = int(np.round(depot_pixels / 69.0))
+                # ==========================================
+                # 🚨 鐵心協定強制介入：5 隻出籠，立刻編隊！
+                # ==========================================
+                try:
+                    group_2_count = obs.observation.control_groups[2][1]
+                except:
+                    group_2_count = 0
+                    
+                m_unit = obs.observation.feature_minimap.unit_type
+                m_relative = obs.observation.feature_minimap.player_relative
+                total_marauders_map = np.sum((m_unit == 51) & (m_relative == 1))
                 
-                # ==========================================
-                # ✨ 升級版：科技樹動態動作遮罩 (Tech-Tree Masking)
-                # ==========================================
+                force_action = None
                 
-                # ==========================================
-                # ✨ 升級版：科技樹動態動作遮罩 (Tech-Tree Masking)
-                # ==========================================
-                
-                # 👉 呼叫我們寫好的神級防呆函數，直接取得 0~10 的合法索引！
-                allowed_indices = get_action_mask(obs)
+                # 條件：地圖上有 5 隻掠奪者，且編隊 2 是空的
+                if total_marauders_map >= 5 and group_2_count == 0:
+                    force_action = 46
+                    agent.is_combat_mode = True # 強制將大腦切換至戰鬥模式
 
-                
-                # 選擇動作 (降維版 + 拘束器發威)
-                if random.random() <= epsilon:
-                    # ✨ 從「合法」的選項中隨機挑選索引！(不再是全部盲選)
-                    action_index = random.choice(allowed_indices)
+                # 取得當下模式的合法清單
+                allowed_indices = get_action_mask(obs, agent)
+
+                # ==========================================
+                # 🎯 動作選擇 (乾淨無重疊版)
+                # ==========================================
+                if force_action is not None:
+                    # 強制執行 46 (無視神經網路的隨機)
+                    a_id = force_action
+                    action_index = VALID_ACTIONS.index(a_id)
                     p_id = random.randint(1, 64)
+                    print("⚠️ [系統介入] 偵測到 5 隻掠奪者閒置，強制執行 Action 46 (編隊)！")
                     with torch.no_grad():
                         _, _, next_hidden_state = brain_model(state_t.unsqueeze(0), hidden_state)
                 else:
-                    with torch.no_grad():
-                        # q_actions 輸出 11 個分數
-                        q_actions, q_params, next_hidden_state = brain_model(state_t.unsqueeze(0), hidden_state)
-                        
-                        # ✨ 套用拘束器遮罩：把不合法動作的分數變成負無限大 (-inf)！
-                        mask = torch.full_like(q_actions, float('-inf'))
-                        mask[0, allowed_indices] = 0
-                        masked_q_actions = q_actions + mask
-                        
-                        # 從合法的動作中，選出分數最高的那一個索引
-                        action_index = masked_q_actions.argmax().item()
-                        p_id = q_params.argmax().item() + 1
-
-                # ✨ 翻譯：把選出的 0~10 索引，轉回星海真實的 Action ID 給引擎執行
-                a_id = VALID_ACTIONS[action_index]
+                    # 一般 DQN 決策
+                    if random.random() <= epsilon:
+                        action_index = random.choice(allowed_indices)
+                        p_id = random.randint(1, 64)
+                        with torch.no_grad():
+                            _, _, next_hidden_state = brain_model(state_t.unsqueeze(0), hidden_state)
+                    else:
+                        with torch.no_grad():
+                            q_actions, q_params, next_hidden_state = brain_model(state_t.unsqueeze(0), hidden_state)
+                            mask = torch.full_like(q_actions, float('-inf'))
+                            mask[0, allowed_indices] = 0
+                            masked_q_actions = q_actions + mask
+                            action_index = masked_q_actions.argmax().item()
+                            p_id = q_params.argmax().item() + 1
+                            
+                    a_id = VALID_ACTIONS[action_index]
+                    
+                # ==========================================
                 # ==========================================
                 # ==========================================
                 # ✨ 核心防彈機制：在一開始就先給定預設發呆動作！
@@ -538,7 +551,7 @@ def main(argv):
                 # 執行動作並進入下一幀
                 obs_list = env.step([sc2_action, actions.FUNCTIONS.no_op()])
                 next_obs = obs_list[0]
-                next_allowed_indices = get_action_mask(next_obs)
+                next_allowed_indices = get_action_mask(next_obs, agent)
 
                 if sc2_action.function != 0:
                     current_action_success = 1.0
@@ -608,27 +621,27 @@ def main(argv):
                     print(f"🎯 掠奪者產出！目前進度: {current_real_count}/5")
 
                 # 3.終局判定：由「幀數」主導的勝負邏輯
+                # 3.終局判定：由「幀數」主導的勝負邏輯
                 current_loop = int(next_obs.observation.game_loop[0])
-                # 定義回合結束的三個條件：遊戲結束、時間耗盡（13440 幀）、或達成 5 隻目標。
-                done = next_obs.last() or current_loop >= 13440 or current_real_count >= 5
+                
+                # 🌟 修正結束條件：移除 5 隻的限制，現在只有遊戲結束或超時才會停！
+                done = next_obs.last() or current_loop >= 13440
 
                 # ==========================================
-                # ⚠️ 第一步：執行高壓的時間效率結算
+                # 🏆 實戰里程碑結算 (取代原本的終局結算)
                 # ==========================================
+                # 當「第一次」達到 5 隻時，給予巨額獎金與時間加成，但遊戲繼續進行！
+                if "first_5_marauders" not in achieved_milestones and current_real_count >= 5:
+                    achieved_milestones.add("first_5_marauders")
+                    time_bonus = (1.0 - (current_loop / 13440.0)) * 50.0
+                    step_reward += (50.0 + time_bonus)
+                    print(f"🎉 [里程碑達成] 成功產出 5 隻掠奪者！獲得效率獎金: +{time_bonus:.1f}")
+
                 if done:
-                    if current_real_count >= 5:
-                        # 公式：(剩餘時間佔總時間的比例) * 50 分
-                        time_bonus = (1.0 - (current_loop / 13440.0)) * 50.0
-                        #time_bonus：這是一個線性獎勵
-                        # 如果 AI 在第 1 幀就完成，獎金接近 50；如果等到最後 1 幀才完成，獎金接近 0。
-                        #意義：強制 AI 優化路徑。AI 會發現發呆是很昂貴的，「省下的時間 = 賺到的分數」。
-                        step_reward += (50.0 + time_bonus)
-                        print(f"✅ 任務成功！剩餘時間獎金: +{time_bonus:.1f}")
-                    else:
-                        # 失敗結算：嚴厲倒扣，不給任何安慰分。
-                        # 嚴厲邏輯：沒產滿就是失敗，強制 AI 去探索「成功」的那條路。
+                    if "first_5_marauders" not in achieved_milestones:
+                        # 如果整局打完 (或超時) 都沒能產出 5 隻，給予嚴厲懲罰
                         step_reward -= 20.0
-                        print(f"❌ 任務失敗：效率不足或時間耗盡，最終懲罰 -20")
+                        print(f"❌ 任務失敗：時間耗盡仍未湊齊 5 隻，最終懲罰 -20")
 
                 # ==========================================
                 # ⚠️ 第二步：分數壓縮 (Normalization)
