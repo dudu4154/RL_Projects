@@ -87,13 +87,41 @@ class ProductionAI:
         
         centers = []
         temp_x, temp_y = list(x), list(y)
+        
+        # 針對掠奪者 (MARAUDER_ID) 稍微縮小判定半徑，避免將相鄰的單位合併
+        # 一般步兵單位在 84x84 解析度下大約佔 3-5 個像素寬度
+        radius = 5 if unit_id == MARAUDER_ID else 12 
+
         while temp_x:
             bx, by = temp_x[0], temp_y[0]
-            # 使用像素遮罩尋找連通區域的中心點
-            mask = (np.abs(np.array(temp_x) - bx) < 12) & (np.abs(np.array(temp_y) - by) < 12)
-            centers.append((int(np.mean(np.array(temp_x)[mask])), int(np.mean(np.array(temp_y)[mask]))))
+            # 找到與當前點距離在 radius 內的所有點
+            mask = (np.abs(np.array(temp_x) - bx) < radius) & (np.abs(np.array(temp_y) - by) < radius)
+            
+            # 計算這個群體的中心點
+            cluster_x = np.array(temp_x)[mask]
+            cluster_y = np.array(temp_y)[mask]
+            center = (int(np.mean(cluster_x)), int(np.mean(cluster_y)))
+            
+            # 估算這坨像素包含了幾隻單位
+            # 掠奪者在 84x84 下大約佔 10-15 個像素點
+            pixels_count = len(cluster_x)
+            estimated_units = max(1, int(round(pixels_count / 12.0))) if unit_id == MARAUDER_ID else 1
+            
+            # 根據估算數量，將同一個中心點加入多次 (為了後續點擊時能對著同一坨擠在一起的兵多點幾次)
+            # 或者稍微加入一點點偏移量
+            if unit_id == MARAUDER_ID and estimated_units > 1:
+                for i in range(estimated_units):
+                     # 稍微偏移，模擬點擊人群中不同位置
+                    offset_x = random.randint(-2, 2)
+                    offset_y = random.randint(-2, 2)
+                    centers.append((np.clip(center[0] + offset_x, 0, 83), np.clip(center[1] + offset_y, 0, 83)))
+            else:
+                centers.append(center)
+
+            # 將已處理過的點移除
             temp_x = [px for i, px in enumerate(temp_x) if not mask[i]]
             temp_y = [py for i, py in enumerate(temp_y) if not mask[i]]
+            
         return centers
 
     def get_action(self, obs, action_id, parameter=None):
@@ -195,7 +223,6 @@ class ProductionAI:
             return self._select_scv_prioritized(obs, unit_type, available)
         
         # [Action 3] 建造工廠 (150 M, 100 V)
-        # [Action 3] 建造工廠 (150 M, 100 V)
         elif action_id == 3:
             if player.minerals < 150 or player.vespene < 100:
                 self.locked_action = None
@@ -279,6 +306,7 @@ class ProductionAI:
 
             self.locked_action = 5
             return self._select_scv_prioritized(obs, unit_type, available)
+        
         # [Action 6] 建造指揮中心 (400 M)
         elif action_id == 6:
             if player.minerals < 400 :
@@ -460,7 +488,6 @@ class ProductionAI:
             return self._select_unit(unit_type, ORBITAL_COMMAND_ID)
 
         # [Action 16] 製造陸戰隊 (Marine) - 50 M
-        
         elif action_id == 16:
             # 1. 如果資源不足，直接放棄並解除鎖定，避免卡死
             if player.minerals < 50:
@@ -712,6 +739,7 @@ class ProductionAI:
                 return actions.FUNCTIONS.select_point("select", random.choice(barracks_centers))
             
             return actions.FUNCTIONS.no_op()
+        
         # [Action 35] 軍工廠升級 (修正版：增加掛件偵測)
         elif action_id == 35:
             # 1. 判定要蓋哪種掛件
@@ -813,7 +841,6 @@ class ProductionAI:
             return self._select_unit(unit_type, GHOST_ACADEMY_ID)
         
         # [Action 40]移動視角
-        # [Action 40] 智慧移動視角 (整合編隊跳轉邏輯)
         elif action_id == 40:
             p_idx = max(0, self.active_parameter - 1) % 64
             # D. 標準網格移動
@@ -874,6 +901,8 @@ class ProductionAI:
             
             self.locked_action = 42; self.lock_timer = 1
             return self._select_mineral_worker(obs, unit_type, available)
+        
+        # [Action 43] 全選並出動
         elif action_id == 43:
             # 1. 判斷敵方基地坐標 (基於你目前的 base_location_code)
             # 如果我方在左上 (0)，敵方就在右下；反之亦然
@@ -893,9 +922,11 @@ class ProductionAI:
             
             return actions.FUNCTIONS.no_op()
         
+        # [Action 44] 發呆
         elif action_id ==44:
             return actions.FUNCTIONS.no_op()
         
+        # [Action 45] 主堡編隊 若以編隊移動視角
         elif action_id == 45:
             # 1. 檢查相關動作是否可用
             if actions.FUNCTIONS.select_control_group.id not in available:
@@ -959,6 +990,395 @@ class ProductionAI:
                             
                         return actions.FUNCTIONS.move_camera(target_minimap)
 
+        # [Action 46] 時間軸戰術編隊 (Hotkey 2) - F2 真實版
+        elif action_id == 46:
+            step = self.lock_timer
+            current_loop = int(obs.observation.game_loop[0])
+            is_late_game = current_loop >= 10752 # 8分鐘分水嶺
+            
+            try:
+                # 👉 修正：讀取編隊 2 的數量
+                group_2_count = obs.observation.control_groups[2][1]
+            except:
+                group_2_count = 0
+
+            # --- 第 0 步：掃描畫面並決定策略 ---
+            if step == 0:
+                # 【8 分鐘後：直接進入 F2 總攻模式】
+                if is_late_game:
+                    if actions.FUNCTIONS.select_army.id not in available:
+                        self.locked_action = None
+                        return actions.FUNCTIONS.no_op()
+                    
+                    self.locked_target = "F2_ALL"
+                    self.locked_action = 46
+                    
+                # 【8 分鐘前：維持特種部隊模式】
+                else:
+                    marauder_centers = self._find_units_centers(unit_type, MARAUDER_ID)
+                    total_marauders = len(marauder_centers)
+                    
+                    if total_marauders == 0:
+                        self.locked_action = None
+                        if group_2_count > 0 and actions.FUNCTIONS.select_control_group.id in available:
+                            return actions.FUNCTIONS.select_control_group("recall", 2) # 👉 修正為 2
+                        return actions.FUNCTIONS.no_op()
+                        
+                    if group_2_count >= 5:
+                        self.locked_action = None
+                        if actions.FUNCTIONS.select_control_group.id in available:
+                            return actions.FUNCTIONS.select_control_group("recall", 2) # 👉 修正為 2
+                        return actions.FUNCTIONS.no_op()
+                        
+                    target_count = min(5 - group_2_count, total_marauders)
+                    self.locked_target = marauder_centers[:target_count]
+                    self.locked_action = 46
+
+            # --- 防呆機制 ---
+            if getattr(self, 'locked_target', None) is None:
+                self.locked_action = None
+                self.lock_timer = 0
+                return actions.FUNCTIONS.no_op()
+
+            # ==========================================
+            # 模式 A：總攻模式 (8分鐘後：使用 F2 全選)
+            # ==========================================
+            if self.locked_target == "F2_ALL":
+                if step == 0:
+                    return actions.FUNCTIONS.select_army("select")
+                elif step == 1:
+                    self.locked_action = None
+                    self.lock_timer = 0
+                    self.locked_target = None
+                    if actions.FUNCTIONS.select_control_group.id in available:
+                        print("🔥 [8分鐘後] F2 大軍集結！全圖戰鬥單位已覆蓋編入 Group 2！")
+                        return actions.FUNCTIONS.select_control_group("set", 2) # 👉 修正為 2
+                
+                return actions.FUNCTIONS.no_op()
+
+            # ==========================================
+            # 模式 B：特種部隊模式 (8分鐘前：點擊缺額補齊)
+            # ==========================================
+            else:
+                target_count = len(self.locked_target)
+                
+                if step < target_count:
+                    target_pos = self.locked_target[step]
+                    # 👉 修正：使用 group_2_count 判斷
+                    if step == 0 and group_2_count == 0:
+                        return actions.FUNCTIONS.select_point("select", target_pos)
+                    else:
+                        return actions.FUNCTIONS.select_point("toggle", target_pos)
+
+                elif step == target_count:
+                    self.locked_action = None
+                    self.lock_timer = 0
+                    self.locked_target = None
+                    if actions.FUNCTIONS.select_control_group.id in available:
+                        print(f"🎯 [8分鐘前] 乾淨補齊小隊！(已過濾工兵/建築) 目前 Group 2 總數: {group_2_count + target_count}")
+                        return actions.FUNCTIONS.select_control_group("append", 2) # 👉 修正為 2
+
+            return actions.FUNCTIONS.no_op()
+        
+        # [Action 47] 操控編隊2 A-move 到指定區域（穩定版）
+        elif action_id == 47:
+            step = self.lock_timer
+
+            try:
+                group_2_count = obs.observation.control_groups[2][1]
+            except:
+                group_2_count = 0
+
+            if group_2_count == 0:
+                self.locked_action = None
+                self.lock_timer = 0
+                self.locked_target = None
+                return actions.FUNCTIONS.no_op()
+
+            # 用 parameter 決定目標區域
+            p_idx = max(0, self.active_parameter - 1) % 64
+            r, c = p_idx // 8, p_idx % 8
+
+            target_minimap = (
+                np.clip(int((c + 0.5) * 8), 0, 63),
+                np.clip(int((r + 0.5) * 8), 0, 63)
+            )
+
+            target_screen = (
+                np.clip(int((c + 0.5) * 10.5), 0, 83),
+                np.clip(int((r + 0.5) * 10.5), 0, 83)
+            )
+
+            if step == 0:
+                self.locked_action = 47
+                self.locked_target = {
+                    "minimap": target_minimap,
+                    "screen": target_screen
+                }
+                self.lock_timer = 0
+
+                if actions.FUNCTIONS.select_control_group.id in available:
+                    return actions.FUNCTIONS.select_control_group("recall", 2)
+                return actions.FUNCTIONS.no_op()
+
+            elif step == 1:
+                if actions.FUNCTIONS.move_camera.id in available:
+                    return actions.FUNCTIONS.move_camera(self.locked_target["minimap"])
+                return actions.FUNCTIONS.no_op()
+
+            elif step == 2:
+                # 優先 A-move
+                if actions.FUNCTIONS.Attack_screen.id in available:
+                    self.locked_action = None
+                    self.lock_timer = 0
+                    self.locked_target = None
+                    return actions.FUNCTIONS.Attack_screen("now", self.locked_target["screen"])
+
+                # 備案：普通移動
+                if actions.FUNCTIONS.Move_screen.id in available:
+                    self.locked_action = None
+                    self.lock_timer = 0
+                    self.locked_target = None
+                    return actions.FUNCTIONS.Move_screen("now", self.locked_target["screen"])
+
+                self.locked_action = None
+                self.lock_timer = 0
+                self.locked_target = None
+                return actions.FUNCTIONS.no_op()
+
+            self.locked_action = None
+            self.lock_timer = 0
+            self.locked_target = None
+            return actions.FUNCTIONS.no_op()
+        
+        # [Action 48] 編隊2 鎖定畫面中的敵方單位（集火穩定版）
+        elif action_id == 48:
+            step = self.lock_timer
+
+            try:
+                group_2_count = obs.observation.control_groups[2][1]
+            except:
+                group_2_count = 0
+
+            if group_2_count == 0:
+                self.locked_action = None
+                self.lock_timer = 0
+                self.locked_target = None
+                return actions.FUNCTIONS.no_op()
+
+            # 用 parameter 決定要看的區域
+            p_idx = max(0, self.active_parameter - 1) % 64
+            r, c = p_idx // 8, p_idx % 8
+
+            target_minimap = (
+                np.clip(int((c + 0.5) * 8), 0, 63),
+                np.clip(int((r + 0.5) * 8), 0, 63)
+            )
+
+            fallback_screen = (
+                np.clip(int((c + 0.5) * 10.5), 0, 83),
+                np.clip(int((r + 0.5) * 10.5), 0, 83)
+            )
+
+            if step == 0:
+                self.locked_action = 48
+                self.locked_target = {
+                    "minimap": target_minimap,
+                    "fallback": fallback_screen
+                }
+                self.lock_timer = 0
+
+                if actions.FUNCTIONS.select_control_group.id in available:
+                    return actions.FUNCTIONS.select_control_group("recall", 2)
+                return actions.FUNCTIONS.no_op()
+
+            elif step == 1:
+                if actions.FUNCTIONS.move_camera.id in available:
+                    return actions.FUNCTIONS.move_camera(self.locked_target["minimap"])
+                return actions.FUNCTIONS.no_op()
+
+            elif step == 2:
+                player_relative = obs.observation.feature_screen[
+                    features.SCREEN_FEATURES.player_relative.index
+                ]
+
+                # 先找敵方戰鬥單位，再找工兵
+                enemy_mask = (player_relative == 4)
+                ey, ex = enemy_mask.nonzero()
+
+                # 優先抓敵方工兵
+                worker_mask = (player_relative == 4) & (
+                    (unit_type == 45) | (unit_type == 84) | (unit_type == 104)
+                )
+                wy, wx = worker_mask.nonzero()
+
+                # 若有敵方工兵，優先集火工兵
+                if wx.any():
+                    target = (int(wx[0]), int(wy[0]))
+                    if actions.FUNCTIONS.Attack_screen.id in available:
+                        self.locked_action = None
+                        self.lock_timer = 0
+                        self.locked_target = None
+                        return actions.FUNCTIONS.Attack_screen("now", target)
+
+                # 沒工兵就打最近敵軍
+                if ex.any():
+                    center = np.array([42, 42])
+                    pts = np.column_stack((ex, ey))
+                    dists = np.sum((pts - center) ** 2, axis=1)
+                    idx = int(np.argmin(dists))
+                    target = (int(pts[idx][0]), int(pts[idx][1]))
+
+                    if actions.FUNCTIONS.Attack_screen.id in available:
+                        self.locked_action = None
+                        self.lock_timer = 0
+                        self.locked_target = None
+                        return actions.FUNCTIONS.Attack_screen("now", target)
+
+                # 找不到敵人就 A 過去那格
+                if actions.FUNCTIONS.Attack_screen.id in available:
+                    self.locked_action = None
+                    self.lock_timer = 0
+                    self.locked_target = None
+                    return actions.FUNCTIONS.Attack_screen("now", self.locked_target["fallback"])
+
+                if actions.FUNCTIONS.Move_screen.id in available:
+                    self.locked_action = None
+                    self.lock_timer = 0
+                    self.locked_target = None
+                    return actions.FUNCTIONS.Move_screen("now", self.locked_target["fallback"])
+
+                self.locked_action = None
+                self.lock_timer = 0
+                self.locked_target = None
+                return actions.FUNCTIONS.no_op()
+
+            self.locked_action = None
+            self.lock_timer = 0
+            self.locked_target = None
+            return actions.FUNCTIONS.no_op()
+        
+        # [Action 49] 蓋2礦（工兵先走過去，再蓋；工兵編隊3）
+        elif action_id == 49:
+            step = self.lock_timer
+
+            # 礦不夠
+            if player.minerals < 400:
+                self.locked_action = None
+                self.lock_timer = 0
+                self.locked_target = None
+                return actions.FUNCTIONS.no_op()
+
+            # 已有二礦就不做
+            cc_count = 0
+            for cid in [COMMAND_CENTER_ID, ORBITAL_COMMAND_ID, PLANETARY_FORTRESS_ID]:
+                cc_count += len(self._find_units_centers(unit_type, cid))
+            if cc_count >= 2:
+                self.locked_action = None
+                self.lock_timer = 0
+                self.locked_target = None
+                return actions.FUNCTIONS.no_op()
+
+            # 寫死二礦位置
+            if self.base_location_code == 1:   # 右下出生
+                expand_screen = (32, 66)
+                expand_minimap = (25, 50)
+            else:                              # 左上出生
+                expand_screen = (64, 37)
+                expand_minimap = (48, 28)
+
+            scv_selected = self._is_scv_selected(obs)
+
+            # 找目前被選中的SCV位置（若有）
+            scv_pos = None
+            selected = obs.observation.feature_screen[features.SCREEN_FEATURES.selected.index]
+            mask = (unit_type == SCV_ID) & (selected == 1)
+            y_sel, x_sel = mask.nonzero()
+            if x_sel.any():
+                scv_pos = (int(x_sel.mean()), int(y_sel.mean()))
+
+            # Step 0：選工兵
+            if step == 0:
+                self.locked_action = 49
+                self.locked_target = {
+                    "screen": expand_screen,
+                    "minimap": expand_minimap
+                }
+                self.lock_timer = 0
+                return self._select_scv_prioritized(obs, unit_type, available)
+
+            # Step 1：工兵編隊3
+            elif step == 1:
+                if scv_selected and actions.FUNCTIONS.select_control_group.id in available:
+                    return actions.FUNCTIONS.select_control_group("set", 3)
+
+                return self._select_scv_prioritized(obs, unit_type, available)
+
+            # Step 2：叫出編隊3
+            elif step == 2:
+                if actions.FUNCTIONS.select_control_group.id in available:
+                    return actions.FUNCTIONS.select_control_group("recall", 3)
+                return actions.FUNCTIONS.no_op()
+
+            # Step 3：移動視角到二礦
+            elif step == 3:
+                if actions.FUNCTIONS.move_camera.id in available:
+                    return actions.FUNCTIONS.move_camera(self.locked_target["minimap"])
+                return actions.FUNCTIONS.no_op()
+
+            # Step 4：工兵先走過去
+            elif step == 4:
+                if not scv_selected and actions.FUNCTIONS.select_control_group.id in available:
+                    return actions.FUNCTIONS.select_control_group("recall", 3)
+
+                if scv_selected and actions.FUNCTIONS.Move_screen.id in available:
+                    return actions.FUNCTIONS.Move_screen("now", self.locked_target["screen"])
+
+                return actions.FUNCTIONS.no_op()
+
+            # Step 5：等靠近，靠近後就停一拍
+            elif step == 5:
+                target = self.locked_target["screen"]
+
+                if not scv_selected and actions.FUNCTIONS.select_control_group.id in available:
+                    self.lock_timer = 3
+                    return actions.FUNCTIONS.select_control_group("recall", 3)
+
+                if scv_pos is not None:
+                    dist = np.sqrt((scv_pos[0] - target[0]) ** 2 + (scv_pos[1] - target[1]) ** 2)
+
+                    if dist <= 8:
+                        return actions.FUNCTIONS.no_op()
+
+                    if actions.FUNCTIONS.Move_screen.id in available:
+                        self.lock_timer = 4
+                        return actions.FUNCTIONS.Move_screen("now", target)
+
+                return actions.FUNCTIONS.no_op()
+
+            # Step 6：開始蓋二礦
+            elif step == 6:
+                target = self.locked_target["screen"]
+
+                if not scv_selected and actions.FUNCTIONS.select_control_group.id in available:
+                    self.lock_timer = 2
+                    return actions.FUNCTIONS.select_control_group("recall", 3)
+
+                if actions.FUNCTIONS.Build_CommandCenter_screen.id in available:
+                    self.locked_action = None
+                    self.lock_timer = 0
+                    self.locked_target = None
+                    return actions.FUNCTIONS.Build_CommandCenter_screen("now", target)
+
+                # 還沒出現建造按鈕，等一下
+                return actions.FUNCTIONS.no_op()
+
+            # 超過步驟還沒成功就解鎖，避免卡死
+            self.locked_action = None
+            self.lock_timer = 0
+            self.locked_target = None
+            return actions.FUNCTIONS.no_op()
+
         return actions.FUNCTIONS.no_op()
         
     # --- 內部輔助函式 ---
@@ -1007,6 +1427,7 @@ class ProductionAI:
         # 沒礦工才隨機抓
         idx = random.randint(0, len(x) - 1)
         return actions.FUNCTIONS.select_point("select", (x[idx], y[idx]))
+    
     def _select_mineral_worker(self, obs, unit_type, available):
         """ 專門尋找「遠離瓦斯」且「靠近礦脈」的工兵 """
         if actions.FUNCTIONS.select_idle_worker.id in available:
@@ -1043,6 +1464,7 @@ class ProductionAI:
         
         # 如果真的沒找到純礦工，回傳 no_op 等待下一幀，不要亂抓
         return actions.FUNCTIONS.no_op()
+    
     def _calc_barracks_pos(self, obs):
         """ 修正版：根據指揮中心位置動態計算兵營座標，確保右側空間 """
         global BASE_LOCATION_CODE  # 宣告使用全域變數
@@ -1097,20 +1519,21 @@ def main(argv):
         map_name="Simple96",
         players=[
     sc2_env.Agent(sc2_env.Race.terran), 
-    sc2_env.Bot(sc2_env.Race.terran, sc2_env.Difficulty.very_easy) # 改為電腦 AI，難度最簡單
+    sc2_env.Agent(sc2_env.Race.terran)
+    #sc2_env.Bot(sc2_env.Race.terran, sc2_env.Difficulty.very_easy) # 改為電腦 AI，難度最簡單
 ],
         agent_interface_format=sc2_env.AgentInterfaceFormat(
             feature_dimensions=sc2_env.Dimensions(screen=84, minimap=64),
             use_raw_units=False),
-        step_mul=16,
+        step_mul=4,
         realtime=False,
     ) as env:
         while True:
             print("--- 啟動新對局 ---")
             obs_list = env.reset()
             while True:
-                action_id = 45 #random.choice([1,47])#1#random.randint(1, 41)
-                param = random.randint(1, 64)#1# # 網格限制 1-16
+                action_id =  49#random.randint(1,2,11,18,34,41,42)#45 #1
+                param = 1#1# # 網格限制 1-64
                 
                 sc2_action = agent.get_action(obs_list[0], action_id, parameter=param)
                 
