@@ -1,6 +1,5 @@
 import os
 import random
-import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -12,6 +11,8 @@ from pysc2.lib import actions, features
 import pickle
 import threading # 加上這行
 import copy
+import pygame
+import numpy as np
 
 import os
 os.environ["SC2PATH"] = r"D:\StarCraft II"
@@ -186,6 +187,10 @@ def get_state_vector(obs, current_block, target_project_id, last_action_id, last
 # =========================================================
 def main(argv):
     del argv
+    pygame.init()
+    screen = pygame.display.set_mode((800, 600))
+    pygame.display.set_caption("DRQN 決策中樞可視化")
+    clock = pygame.time.Clock()
     state_size = 17  
     IS_TRAINING = True
     # 確保清單包含生產、戰鬥與切換(50)
@@ -242,6 +247,48 @@ def main(argv):
         print("✅ 載入成功！接續之前的記憶繼續訓練...")
 
     epsilon = 1.00; epsilon_decay = 0.998; gamma = 0.998
+
+    def draw_dual_head_network(surface, model, state_vector):
+        # 提取權重數據 
+        act_weights = model.fc_action.weight.data.cpu().numpy() # [15, 128]
+        param_weights = model.fc_param.weight.data.cpu().numpy() # [64, 128]
+        
+        # --- 座標定義 ---
+        # 輸入層 (左側 17 點) 
+        in_nodes = [(100, y * 25 + 100) for y in range(17)]
+        
+        # 隱藏層 (中間抽樣 16 點) 
+        hid_nodes = [(300, y * 25 + 110) for y in range(16)]
+        
+        # 動作輸出 (右上 15 點) 
+        act_nodes = [(550, y * 25 + 50) for y in range(15)]
+        
+        # 參數輸出 (右下 8x8 網格) [cite: 20]
+        param_nodes = []
+        for r in range(8):
+            for c in range(8):
+                param_nodes.append((550 + c*15, 450 + r*15))
+
+        # --- 繪製連線 (以隱藏層到輸出層為例) ---
+        # 1. 繪製動作連線 (Action Head)
+        for h_idx, h_pos in enumerate(hid_nodes):
+            for a_idx, a_pos in enumerate(act_nodes):
+                w = act_weights[a_idx][h_idx]
+                if abs(w) > 0.5: # 僅繪製強相關，避免混亂
+                    color = (255, 50, 50) if w < 0 else (50, 50, 255)
+                    pygame.draw.line(surface, color, h_pos, a_pos, 1)
+
+        # 2. 繪製座標連線 (Parameter Head)
+        for h_idx, h_pos in enumerate(hid_nodes):
+            for p_idx, p_pos in enumerate(param_nodes):
+                w = param_weights[p_idx][h_idx]
+                if abs(w) > 0.6: # 座標層節點多，門檻設高一點
+                    color = (255, 100, 100) if w < 0 else (100, 100, 255)
+                    pygame.draw.line(surface, color, h_pos, p_pos, 1)
+
+        # --- 繪製節點本體 ---
+        for pos in in_nodes + hid_nodes + act_nodes + param_nodes:
+            pygame.draw.circle(surface, (255, 255, 255), pos, 6)
 
     def get_action_mask(target_obs, agent):
         player = target_obs.observation.player
@@ -494,7 +541,8 @@ def main(argv):
                 total_marauders_map = np.sum((m_unit == 51) & (m_relative == 1))
                 
                 force_action = None
-                
+                for event in pygame.event.get():
+                    if event.type == pygame.QUIT: pygame.quit(); return
                 # 條件：地圖上有 5 隻掠奪者，且編隊 2 是空的
                 if total_marauders_map >= 5 and group_2_count == 0:
                     force_action = 46
@@ -552,7 +600,21 @@ def main(argv):
                 obs_list = env.step([sc2_action, actions.FUNCTIONS.no_op()])
                 next_obs = obs_list[0]
                 next_allowed_indices = get_action_mask(next_obs, agent)
-
+                if train_step_counter % 2 == 0:
+                    screen.fill((30, 30, 30)) # 深灰色背景
+                    draw_dual_head_network(screen, brain_model, state)
+                    
+                    # ✨ 額外加分：顯示目前是 生產 還是 戰鬥 模式
+                    mode_text = "COMBAT" if agent.is_combat_mode else "PRODUCTION"
+                    # (此處可加入 pygame 渲染文字的邏輯)
+                    
+                    pygame.display.flip()
+                    
+                # 處理視窗事件防止當機
+                for event in pygame.event.get():
+                    if event.type == pygame.QUIT:
+                        torch.save(brain_model.state_dict(), model_path)
+                        return
                 if sc2_action.function != 0:
                     current_action_success = 1.0
                 else:

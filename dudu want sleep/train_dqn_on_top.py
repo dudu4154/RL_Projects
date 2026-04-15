@@ -1,6 +1,5 @@
 import os
 import random
-import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -12,6 +11,8 @@ from pysc2.lib import actions, features
 import pickle
 import threading # 加上這行
 import copy
+import pygame
+import numpy as np
 
 import os
 os.environ["SC2PATH"] = r"D:\StarCraft II"
@@ -186,6 +187,10 @@ def get_state_vector(obs, current_block, target_project_id, last_action_id, last
 # =========================================================
 def main(argv):
     del argv
+    pygame.init()
+    screen = pygame.display.set_mode((800, 600))
+    pygame.display.set_caption("DRQN 決策中樞可視化")
+    clock = pygame.time.Clock()
     state_size = 17  
     IS_TRAINING = True
     # 確保清單包含生產、戰鬥與切換(50)
@@ -242,6 +247,112 @@ def main(argv):
         print("✅ 載入成功！接續之前的記憶繼續訓練...")
 
     epsilon = 1.00; epsilon_decay = 0.998; gamma = 0.998
+
+    def draw_dual_head_network(surface, model, state_vector, hidden_state=None):
+        import pygame
+        import numpy as np
+        import torch
+
+        # --- 1. 畫布基礎設定 (Dino 白底風格) ---
+        surface.fill((255, 255, 255)) 
+        try:
+            font = pygame.font.SysFont("arial", 13, bold=True)
+            num_font = pygame.font.SysFont("arial", 10)
+        except:
+            font = pygame.font.SysFont("arial", 13)
+            num_font = pygame.font.SysFont("arial", 10)
+
+        # 標籤定義 (嚴格對應 17 維輸入與 15 種動作) [cite: 14-17, 18]
+        input_labels = ["Workers", "Minerals", "Vespene", "Supply", "Depot", "Gas", 
+                        "Barracks", "TechLab", "SCV Sel", "CC Sel", "Rax Sel", 
+                        "Marine", "Marauder", "Task ID", "Block", "Last OK", "Time"]
+        action_labels = ["Depot", "Barrack", "Refinery", "TrainSCV", "Marine", 
+                        "Marauder", "TechLab", "Mine", "Gas", "Wait", 
+                        "CC Hotkey", "Army Hotkey", "A-move", "Focus", "Switch"]
+
+        # --- 2. 獲取當前決策狀態 (找出最強動作) ---
+        device = next(model.parameters()).device
+        model.eval()
+        with torch.no_grad():
+            # 準備輸入 Tensor [cite: 11-12]
+            state_t = torch.FloatTensor(np.array(state_vector)).unsqueeze(0).to(device)
+            # 若無傳入 hidden_state 則初始化一個空的
+            if hidden_state is None:
+                hidden_state = (torch.zeros(1, 1, 128).to(device), torch.zeros(1, 1, 128).to(device))
+            
+            q_actions, q_params, _ = model(state_t, hidden_state)
+            q_vals = q_actions.cpu().numpy()[0]
+            # 找出前三名動作，解決「右邊沒線」的問題 
+            top_3_indices = np.argsort(q_vals)[-3:] 
+
+        # --- 3. 座標佈局 ---
+        in_pos = [(180, y * 32 + 60) for y in range(17)]
+        hid_pos = [(400, y * 34 + 80) for y in range(16)] # 抽樣 16 個神經元 [cite: 23]
+        act_pos = [(620, y * 30 + 50) for y in range(15)]
+        param_pos = [(620 + (i % 8) * 16, 520 + (i // 8) * 16) for i in range(64)] # [cite: 24]
+
+        # --- 4. 提取權重矩陣 ---
+        fc1_w = model.fc1.weight.data.cpu().numpy()       # [128, 17] [cite: 10]
+        act_w = model.fc_action.weight.data.cpu().numpy() # [15, 128] [cite: 10]
+
+        # --- 5. 🧠 第一層：輸入 -> 隱藏 (訊號感應過濾) ---
+        for i in range(17):
+            input_val = state_vector[i]
+            if input_val < 0.05: continue # 💡 沒數值的感官不畫線，解決「集體連線」煩躁感 
+            
+            for h_idx in range(16):
+                w = fc1_w[h_idx * 8][i]
+                signal = input_val * w # 訊號 = 輸入 x 權重
+                if abs(signal) > 0.08:
+                    # 藍正紅負，亮度隨訊號強度變化
+                    alpha = int(np.clip(abs(signal) * 300, 40, 200))
+                    color = (0, 0, 255, alpha) if signal > 0 else (255, 0, 0, alpha)
+                    
+                    # Pygame 繪製帶透明度的線
+                    line_surf = pygame.Surface(surface.get_size(), pygame.SRCALPHA)
+                    pygame.draw.line(line_surf, color, in_pos[i], hid_pos[h_idx], 1)
+                    surface.blit(line_surf, (0,0))
+
+        # --- 6. 🧠 第二層：隱藏 -> 頂尖動作 (決策聚焦) ---
+        for a_idx in top_3_indices:
+            # 計算相對強度，決定線條粗細
+            is_best = (a_idx == top_3_indices[-1])
+            for h_idx in range(16):
+                w = act_w[a_idx][h_idx * 8]
+                if abs(w) > 0.1: # 💡 低門檻確保「右邊一定有線」
+                    # 第一名用鮮艷色，其餘用淡灰色降低視覺壓力
+                    line_color = (0, 100, 255) if w > 0 else (255, 50, 50)
+                    if not is_best: line_color = (180, 180, 180) # 陪跑動作變灰
+                    
+                    width = int(np.clip(abs(w) * 6, 1, 8)) if is_best else 1
+                    pygame.draw.line(surface, line_color, hid_pos[h_idx], act_pos[a_idx], width)
+
+        # --- 7. 🎨 節點渲染 (Dino 風格圓圈 + 編號) ---
+        def draw_dino_node(pos, label, num, side="left", active_val=0):
+            # 活躍節點發光 
+            bg_color = (180, 255, 180) if active_val > 0.5 else (255, 255, 255)
+            pygame.draw.circle(surface, bg_color, pos, 12)
+            pygame.draw.circle(surface, (0, 0, 0), pos, 12, 2)
+            
+            # 渲染編號
+            n_txt = num_font.render(str(num), True, (0, 0, 0))
+            surface.blit(n_txt, (pos[0]-n_txt.get_width()//2, pos[1]-n_txt.get_height()//2))
+            
+            if label:
+                l_txt = font.render(label, True, (0, 0, 0))
+                x_off = -110 if side == "left" else 22
+                surface.blit(l_txt, (pos[0] + x_off, pos[1] - 8))
+
+        for i, pos in enumerate(in_pos):
+            draw_dino_node(pos, input_labels[i], i, "left", state_vector[i])
+        for i, pos in enumerate(hid_pos):
+            draw_dino_node(pos, None, i + 100)
+        for i, pos in enumerate(act_pos):
+            # 高亮正在被選中的最強動作
+            node_bg = (150, 150, 255) if i == top_3_indices[-1] else (255, 255, 255)
+            draw_dino_node(pos, action_labels[i], i, "right", 1.0 if i == top_3_indices[-1] else 0)
+        for pos in param_pos:
+            pygame.draw.circle(surface, (230, 230, 230), pos, 4, 1)
 
     def get_action_mask(target_obs, agent):
         player = target_obs.observation.player
@@ -494,7 +605,8 @@ def main(argv):
                 total_marauders_map = np.sum((m_unit == 51) & (m_relative == 1))
                 
                 force_action = None
-                
+                for event in pygame.event.get():
+                    if event.type == pygame.QUIT: pygame.quit(); return
                 # 條件：地圖上有 5 隻掠奪者，且編隊 2 是空的
                 if total_marauders_map >= 5 and group_2_count == 0:
                     force_action = 46
@@ -552,7 +664,21 @@ def main(argv):
                 obs_list = env.step([sc2_action, actions.FUNCTIONS.no_op()])
                 next_obs = obs_list[0]
                 next_allowed_indices = get_action_mask(next_obs, agent)
-
+                if train_step_counter % 2 == 0:
+                    screen.fill((30, 30, 30)) # 深灰色背景
+                    draw_dual_head_network(screen, brain_model, state)
+                    
+                    # ✨ 額外加分：顯示目前是 生產 還是 戰鬥 模式
+                    mode_text = "COMBAT" if agent.is_combat_mode else "PRODUCTION"
+                    # (此處可加入 pygame 渲染文字的邏輯)
+                    
+                    pygame.display.flip()
+                    
+                # 處理視窗事件防止當機
+                for event in pygame.event.get():
+                    if event.type == pygame.QUIT:
+                        torch.save(brain_model.state_dict(), model_path)
+                        return
                 if sc2_action.function != 0:
                     current_action_success = 1.0
                 else:
