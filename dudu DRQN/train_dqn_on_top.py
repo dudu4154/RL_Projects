@@ -60,7 +60,7 @@ REWARD_CONFIG = {
 }
 
 # =========================================================
-# 🐒 路徑設定
+# 🐒 路徑設定git
 # =========================================================
 current_dir = os.path.dirname(os.path.abspath(__file__))
 log_dir = os.path.join(current_dir, "log")
@@ -158,25 +158,34 @@ def get_state_vector(obs, current_block, target_project_id, last_action_id, last
     # 計算單位數量 (從迷霧/小地圖計算)
     def count_unit(unit_id):
         return np.sum((m_unit == unit_id) & (m_relative == 1))
+    
+
+    # 資源正規化（修正分母，讓 AI 對資源變化更敏感）
+    # 原本分母 2000/1000 太大，實際遊戲中礦幾乎不超過 400，瓦斯不超過 200
+    # 導致 AI 感受到的數值永遠在 0.0~0.1 之間，學習效果很差
+    mineral_ratio = min(float(player.minerals) / 400.0, 1.0)
+    vespene_ratio = min(float(player.vespene) / 200.0, 1.0)
+
 
     state_list = [
-        min(float(player.food_workers) / 50.0, 1.0),   # 1. 工兵數量
-        min(float(player.minerals) / 2000.0, 1.0),     # 2. 晶礦儲量 
-        min(float(player.vespene) / 1000.0, 1.0),      # 3. 瓦斯儲量
-        min(float(player.food_used) / 200.0, 1.0),     # 4. 目前人口
-        min(float(count_unit(19)) / 10.0, 1.0),        # 5. 補給站數量
-        min(float(count_unit(20)) / 2.0, 1.0),         # 6. 瓦斯廠數量
-        min(float(count_unit(21)) / 5.0, 1.0),         # 7. 軍營數量
-        min(float(count_unit(37)) / 5.0, 1.0),         # 8. 科技室數量
-        min(float(is_scv_selected), 1.0),              # 9. 選中工兵
-        min(float(is_cc_selected), 1.0),               # 10. 選中主堡
-        min(float(is_barracks_selected), 1.0),         # ✨ 11. 新增：選中兵營
-        min(float(count_unit(48)) / 50.0, 1.0),        # 12. 陸戰隊數量
-        min(float(count_unit(51)) / 30.0, 1.0),        # 13. 掠奪者數量
-        min(float(target_project_id) / 40.0, 1.0),     # 14. 任務 ID
-        min(float(current_block) / 64.0, 1.0),         # 15. 目前視角區塊
-        min(float(last_action_success), 1.0),          # 16. 上一個動作成功與否
-        min(float(current_loop) / 13440.0, 1.0)        # 17. 遊戲時間進度
+        min(float(player.food_workers) / 22.0, 1.0),                      # 1. 工兵總數
+        min(float(player.idle_worker_count) / 10.0, 1.0),                 # 2. 閒置工兵
+        mineral_ratio,                                                      # 3. 晶礦比例
+        vespene_ratio,                                                      # 4. 瓦斯比例
+        mineral_ratio - vespene_ratio,                                      # 5. 資源差距
+        min(float(player.food_used) / 200.0, 1.0),                        # 6. 目前人口
+        min(float(player.food_cap - player.food_used) / 20.0, 1.0),       # 7. 剩餘人口空間
+        min(float(count_unit(19)) / 3.0, 1.0),                            # 8. 補給站數量
+        min(float(count_unit(20)) / 2.0, 1.0),                            # 9. 瓦斯廠數量
+        min(float(count_unit(21)) / 2.0, 1.0),                            # 10. 軍營數量
+        min(float(count_unit(37)) / 1.0, 1.0),                            # 11. 科技室數量
+        min(float(is_scv_selected), 1.0),                                  # 12. 選中工兵
+        min(float(is_cc_selected), 1.0),                                   # 13. 選中主堡
+        min(float(is_barracks_selected), 1.0),                             # 14. 選中兵營
+        min(float(count_unit(48)) / 50.0, 1.0),                           # 15. 陸戰隊數量（保留）
+        min(float(count_unit(51)) / 5.0, 1.0),                            # 16. 掠奪者數量
+        min(float(last_action_success), 1.0),                              # 17. 上一動作成功與否
+        min(float(current_loop) / 13440.0, 1.0)                           # 18. 遊戲時間進度
     ]
     return state_list
 
@@ -188,7 +197,8 @@ def get_state_vector(obs, current_block, target_project_id, last_action_id, last
 def main(argv):
     
     del argv
-    state_size = 17  
+    #state_size = 17
+    state_size = 18
     IS_TRAINING = True
     VALID_ACTIONS = [1, 2, 11, 14, 16, 18, 34, 41, 42, 44, 45]
     action_size = len(VALID_ACTIONS)
@@ -242,7 +252,7 @@ def main(argv):
         target_model.load_state_dict(brain_model.state_dict())
         print("✅ 載入成功！接續之前的記憶繼續訓練...")
 
-    epsilon = 1.00; epsilon_decay = 0.998; gamma = 0.998
+    epsilon = 1.00; epsilon_decay = 0.995; gamma = 0.998
 
     def get_action_mask(target_obs):
         """ 根據當前畫面狀態，回傳合法的 Action 索引列表 """
@@ -263,10 +273,15 @@ def main(argv):
         
         # --- 套用防呆規則 ---
         if (supply_surplus >= 16 or depots >= 3) and 1 in allowed_acts: allowed_acts.remove(1)
-        if float(player.food_workers) >= 22 and 14 in allowed_acts: allowed_acts.remove(14)
+
+        #if float(player.food_workers) >= 22 and 14 in allowed_acts: allowed_acts.remove(14)
+        #你直接告訴 AI「工兵最多22個」，但 AI 永遠不會知道「為什麼是22個」、「多生一個工兵會不會更好」。
+        #教授說的競爭關係就是要讓 AI 自己學到「工兵夠了就不用再生，要把資源拿去造掠奪者」，而不是你幫它決定。
         
         # 👉 修正 2：兵營只要有 2 座就夠了，禁止再蓋，避免卡建築網格
-        if barracks >= 2 and 2 in allowed_acts: allowed_acts.remove(2)
+        #if barracks >= 2 and 2 in allowed_acts: allowed_acts.remove(2)
+        #同樣道理，你幫 AI 決定了「兵營最多2個」。但也許 AI 會學到「3個兵營可以同時生產掠奪者，速度更快」，
+        #你把這個可能性直接封死了。
         if depots == 0 and 2 in allowed_acts: allowed_acts.remove(2)
             
         if barracks == 0:
@@ -282,7 +297,9 @@ def main(argv):
         if refineries == 0 and 42 in allowed_acts: allowed_acts.remove(42)
         
         # 👉 修正 3：如果瓦斯已經大於 150，禁止再瘋狂派兵去採瓦斯 (截斷 Action 42 的無限迴圈)
-        if vespene >= 150 and 42 in allowed_acts: allowed_acts.remove(42)
+        #if vespene >= 150 and 42 in allowed_acts: allowed_acts.remove(42)
+        #這是最明顯的問題。掠奪者需要瓦斯，AI 應該自己學到「要保持瓦斯的庫存」，而不是你幫它設定一個上限。如果你封死這個動作，
+        #AI 根本沒機會學到「什麼時候該繼續採瓦斯、什麼時候夠了」。
             
         if player.idle_worker_count == 0 and 41 in allowed_acts: allowed_acts.remove(41)
         
@@ -407,12 +424,14 @@ def main(argv):
     ) as env:
         
         current_session_file = os.path.join(log_dir, f"dqn_training_log_{int(time.time())}.csv")
+        with open(current_session_file, "w", encoding="utf-8") as f:
+            f.write("Episode,Task,Epsilon,Total_Reward,End_Loop,Marauders,Marines\n")
 
 
         best_record = [13440.0] 
 
         # 如果你有舊的紀錄檔就讀取，沒有就跳過
-        best_time_path = "best_time.txt" 
+        best_time_path = os.path.join(log_dir, "best_time.txt")
         if os.path.exists(best_time_path):
             with open(best_time_path, "r") as f:
                 best_record[0] = float(f.read().strip())
@@ -606,93 +625,90 @@ def main(argv):
                 step_reward = 0.0  # 每一幀開始時，先將本幀獎勵歸零
 
                 # ==========================================
-                # 第一步：科技樹里程碑獎勵（過程引導）
+                # 第一步：科技樹里程碑（追蹤用，不給分）
                 # 設計理念：
-                #   這些獎勵只是「麵包屑」，告訴 AI 科技樹的正確方向。
-                #   數值刻意調小（0.05~0.15），避免 AI 學到「一直蓋建築刷里程碑」就發呆不產兵。
-                #   用 set 確保每個里程碑整局只觸發一次，不會重複給分。
+                #   里程碑只用來追蹤建築完成度（x2），
+                #   不再給過程分數，避免 AI 刷建築分數。
+                #   achieved_milestones 的大小會在終局結算時用到。
                 # ==========================================
+
                 if "depot" not in achieved_milestones and current_depots >= 1:
-                    step_reward += 0.05                      # 補給站是第一步，給最小的引導分
-                    achieved_milestones.add("depot")         # 標記為已達成，後續不再重複給分
-                    print("補給站里程碑 +0.05")
+                    achieved_milestones.add("depot")
+                    print("補給站里程碑達成")
 
                 if "barracks" not in achieved_milestones and current_barracks >= 1:
-                    step_reward += 0.10                      # 兵營是核心建築，略高於補給站
                     achieved_milestones.add("barracks")
-                    print("兵營里程碑 +0.10")
+                    print("兵營里程碑達成")
 
                 if "refinery" not in achieved_milestones and current_refineries >= 1:
-                    step_reward += 0.05                      # 瓦斯廠和補給站同級，都是輔助建築
                     achieved_milestones.add("refinery")
-                    print("瓦斯廠里程碑 +0.05")
+                    print("瓦斯廠里程碑達成")
 
                 if "techlab" not in achieved_milestones and current_techlabs >= 1:
-                    step_reward += 0.15                      # 科技室是掠奪者的直接前置，給最高引導分
                     achieved_milestones.add("techlab")
-                    print("科技室里程碑 +0.15")
+                    print("科技室里程碑達成")
 
                 # ==========================================
-                # 第二步：核心產量獎勵（掠奪者 Marauder）
+                # 第二步：掠奪者產量追蹤（不給過程分）
                 # 設計理念：
-                #   每生出一隻掠奪者給 +0.15。
-                #   5 隻全部生完最多累積 +0.75，加上里程碑約 +1.1，
-                #   tanh(1.1) ≈ 0.8，自然壓縮在合理範圍內。
-                #   用 last_target_count 追蹤數量變化，確保只在「新增」時給分，不會重複。
+                #   只追蹤數量變化，實際加分在終局統一結算。
                 # ==========================================
                 if current_real_count > getattr(agent, 'last_target_count', 0):
                     agent.last_target_count = current_real_count  # 更新追蹤基準
-                    step_reward += 0.15
+                    #step_reward += 0.15
                     print(f"🎯 掠奪者產出！目前進度: {current_real_count}/5")
 
                 # ==========================================
                 # 第三步：終局判定
-                # 三個結束條件：
-                #   1. 遊戲引擎通知結束（next_obs.last()）
-                #   2. 超過時間上限 13440 幀（約 10 分鐘）
-                #   3. 已達成目標：生出 5 隻掠奪者
                 # ==========================================
                 current_loop = int(next_obs.observation.game_loop[0])
                 done = next_obs.last() or current_loop >= 13440 or current_real_count >= 5
 
                 # ==========================================
-                # 第四步：終局結算（只在回合結束時執行）
-                # 設計理念（教授建議）：
-                #   成功 → 用 tanh 把完成時間轉換成獎勵，越快越接近 +1，剛好達標接近 0
-                #   失敗 → 直接給 -1.0，強制覆蓋本幀所有分數，讓模型清楚感知「沒達標 = 完全失敗」
+                # 第四步：終局結算（教授 X-Y 軸公式）
+                # Y 軸：造出五隻掠奪者（任務核心目標）
+                # X 軸：產量 + 建築完成度 + 時間效率
                 # ==========================================
+
+
+
                 if done:
+                    # Y 軸
+                    y = min(current_real_count / 5.0, 1.0)
+                    # 0隻=0.0, 1隻=0.2, 2隻=0.4, 3隻=0.6, 4隻=0.8, 5隻=1.0
+
+                    # X 軸三個維度
+                    x1 = y                                         # X1. 掠奪者產量（直接等於Y軸）
+                    x2 = len(achieved_milestones) / 4.0            # X2. 建築完成度（蓋了幾個里程碑）
+                    x3 = 1.0 - (float(current_loop) / 13440.0)     # X3. 時間效率（越快越高）
+
+
+                    # 成功和失敗用不同公式
                     if current_real_count >= 5:
-                        # 計算時間效率比例
-                        # time_ratio = 1.0 代表瞬間完成（不可能），= 0.0 代表剛好在 deadline 完成
-                        time_ratio = 1.0 - (float(current_loop) / 13440.0)
-
-                        # 用 tanh 將時間效率轉為終局獎勵
-                        # 乘以 3.0 是為了拉大中間段的梯度差異，讓「快一點」和「慢一點」的分數差更明顯
-                        # 例如：time_ratio=0.5 → tanh(1.5) ≈ 0.905，time_ratio=0.2 → tanh(0.6) ≈ 0.537
-                        terminal_reward = math.tanh(time_ratio * 3.0)
-                        step_reward += terminal_reward
-
-                        # 如果這局打破歷史最短完成時間，自動存檔
-                        if float(current_loop) < best_record[0]:
-                            best_record[0] = float(current_loop)
-                            with open(best_time_path, "w") as f:
-                                f.write(str(best_record[0]))
-                            print(f"🔥 新紀錄！最短完成時間: {best_record[0]} 幀")
-
-                        print(f"✅ 任務成功！時間: {current_loop}，終局獎勵: {terminal_reward:.4f}")
-
+                        # 成功：產量 + 建築 + 時間效率都算
+                        raw_score = 0.7 * x1 + 0.1 * x2 + 0.2 * x3
                     else:
-                        progress_ratio = current_real_count / 5.0  # 0隻=0.0, 4隻=0.8
-                        step_reward = -1.0 + progress_ratio * 0.5  # 0隻=-1.0, 4隻=-0.6
-                        print(f"❌ 任務失敗：進度 {current_real_count}/5，懲罰={step_reward:.4f}")
+                        # 失敗：只看造了幾隻，直接給負數
+                        # 0隻=-0.7, 1隻=-0.5, 2隻=-0.3, 3隻=-0.1, 4隻=+0.1
+                        raw_score = x1 - 0.7
+
+                    # 統一用 tanh 壓縮到 [-1, +1]
+                    step_reward = raw_score * 3.0
+
+                    # 更新最短時間紀錄（只在成功時）
+                    if current_real_count >= 5 and float(current_loop) < best_record[0]:
+                        best_record[0] = float(current_loop)
+                        with open(best_time_path, "w") as f:
+                            f.write(str(best_record[0]))
+                        print(f"🔥 新紀錄！最短完成時間: {best_record[0]} 幀")
+
+                    print(f"終局: Y={y:.2f}, X1={x1:.2f}, X2={x2:.2f}, X3={x3:.2f}, raw={raw_score:.4f}")
+                
 
                 # ==========================================
                 # 第五步：tanh 壓縮（核心）
-                # 設計理念：
-                #   不論上面累積了多少原始分數，最終都透過 tanh 壓縮到 [-1, +1]。
-                #   這取代了舊版的「除以 160」，不需要猜魔法數字，數學上保證有界。
-                #   scaled_reward 才是真正存入記憶庫、送進神經網路訓練的值。
+                # 只有終局幀的 step_reward 不為 0，
+                # 過程幀全部是 0，不干擾訓練。
                 # ==========================================
                 scaled_reward = math.tanh(step_reward)
                 episode_reward += scaled_reward
@@ -700,8 +716,6 @@ def main(argv):
                 if done:
                     final_reward = scaled_reward  # 只取終局幀，天然在[-1,+1]，給教授看、寫CSV
 
-            
-            
                 if step_reward != 0:
                     print(f"DEBUG: raw={step_reward:.4f}, tanh後={scaled_reward:.4f}, 累計={episode_reward:.4f}")
 
@@ -785,8 +799,8 @@ def main(argv):
                     memory.append(episode_memory) 
 
                     if current_real_count >= 5:
-                        success_memory.append((total_reward, episode_memory))
-                        success_memory.sort(key=lambda x: x[0], reverse=True)
+                        success_memory.append((current_loop, episode_memory))
+                        success_memory.sort(key=lambda x: x[0], reverse=False)
                         
                         if len(success_memory) > MAX_ELITE_MEMORY:
                             success_memory.pop()
