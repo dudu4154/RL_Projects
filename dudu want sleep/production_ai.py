@@ -1052,7 +1052,7 @@ class ProductionAI:
                     self.lock_timer = 0
                     self.locked_target = None
                     if actions.FUNCTIONS.select_control_group.id in available:
-                        print("🔥 [8分鐘後] F2 大軍集結！全圖戰鬥單位已覆蓋編入 Group 2！")
+                        #print("🔥 [8分鐘後] F2 大軍集結！全圖戰鬥單位已覆蓋編入 Group 2！")
                         return actions.FUNCTIONS.select_control_group("set", 2) # 👉 修正為 2
                 
                 return actions.FUNCTIONS.no_op()
@@ -1076,7 +1076,7 @@ class ProductionAI:
                     self.lock_timer = 0
                     self.locked_target = None
                     if actions.FUNCTIONS.select_control_group.id in available:
-                        print(f"🎯 [8分鐘前] 乾淨補齊小隊！(已過濾工兵/建築) 目前 Group 2 總數: {group_2_count + target_count}")
+                        #print(f"🎯 [8分鐘前] 乾淨補齊小隊！(已過濾工兵/建築) 目前 Group 2 總數: {group_2_count + target_count}")
                         return actions.FUNCTIONS.select_control_group("append", 2) # 👉 修正為 2
 
             return actions.FUNCTIONS.no_op()
@@ -1325,7 +1325,7 @@ class ProductionAI:
             if actions.FUNCTIONS.Build_CommandCenter_screen.id in available:
                 self.locked_action = None 
                 self.lock_timer = 0
-                print(f"🏠 [系統] 遠端下達二礦建造指令！目標網格: {p_idx}")
+                #print(f"🏠 [系統] 遠端下達二礦建造指令！目標網格: {p_idx}")
                 return actions.FUNCTIONS.Build_CommandCenter_screen("now", expand_screen)
 
             # B. 過程狀態：如果已經成功選中 SCV 了
@@ -1345,14 +1345,18 @@ class ProductionAI:
             self.lock_timer = 0 # 確保沒選到人之前，計時器被凍結，絕對不浪費 6 幀的扣打！
             return self._select_scv_prioritized(obs, unit_type, available)
         #切換狀態
+        # 切換狀態
         elif action_id == 50:
             self.locked_action = None
             self.lock_timer = 0
             self.is_combat_mode = not self.is_combat_mode
             mode_str = "⚔️ 戰鬥模式" if self.is_combat_mode else "🏠 生產模式"
-            print(f"🔄 [指揮官] AI 主動切換意識狀態！目前進入: {mode_str}")
+            
+            # 👉 抓取當前遊戲的幀數 (Game Loop)
+            current_loop = int(obs.observation.game_loop[0])
+            
+            #print(f"[{current_loop}] 🔄 [指揮官] AI 主動切換意識狀態！目前進入: {mode_str}")
             return actions.FUNCTIONS.no_op()
-        
         return actions.FUNCTIONS.no_op()
         
     # --- 內部輔助函式 ---
