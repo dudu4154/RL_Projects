@@ -97,7 +97,7 @@ class TrainingLogger:
         
         with open(self.filename, mode='a', newline='', encoding='utf-8-sig') as file:
             writer = csv.writer(file)
-            writer.writerow([ep, task_name, f"{eps:.3f}", int(reward), end_loop, marauders_cnt, marines_cnt])
+            writer.writerow([ep, task_name, f"{eps:.3f}", f"{reward:.4f}", end_loop, marauders_cnt, marines_cnt])
 class Logger:
     def __init__(self, filename):
         self.filename = filename
@@ -176,7 +176,7 @@ def get_state_vector(obs, current_block, target_project_id, last_action_id, last
         min(float(target_project_id) / 40.0, 1.0),     # 14. 任務 ID
         min(float(current_block) / 64.0, 1.0),         # 15. 目前視角區塊
         min(float(last_action_success), 1.0),          # 16. 上一個動作成功與否
-        min(float(current_loop) / 26880.0, 1.0)        # 17. 遊戲時間進度
+        min(float(current_loop) / 13440, 1.0)        # 17. 遊戲時間進度
     ]
     return state_list
 def get_action_mask(obs, agent):
@@ -707,7 +707,6 @@ def main(argv):
                 # 計算掠奪者數量 (ID: 51，每隻約佔 10 像素)
                 u_pixels = np.sum((next_s_unit == 51) & (next_s_player == 1))
                 current_real_count = int(np.round(float(u_pixels) / 10.0))
-                pending_reward += step_reward
 
                 
                 actual_id = agent.locked_action if agent.locked_action is not None else a_id
@@ -738,16 +737,16 @@ def main(argv):
                 #邏輯：當畫面上出現補給站（Depot）、兵營（Barracks）、瓦斯廠（Refinery）]或科技室（Techlab）時，給予 1.0 ~ 3.0 的微量加分。
                 if "depot" not in achieved_milestones and current_depots >= 1:
                     step_reward += 1.0; achieved_milestones.add("depot")
-                    print(1)
+                    #print(1)
                 if "barracks" not in achieved_milestones and current_barracks >= 1:
                     step_reward += 2.0; achieved_milestones.add("barracks")
-                    print(2)
+                    #print(2)
                 if "refinery" not in achieved_milestones and current_refineries >= 1:
                     step_reward += 1.5; achieved_milestones.add("refinery")
-                    print(3)
+                    #print(3)
                 if "techlab" not in achieved_milestones and current_techlabs >= 1:
                     step_reward += 3.0; achieved_milestones.add("techlab")
-                    print(4)
+                    #print(4)
 
 
                 # 2.核心產量獎勵 (掠奪者 Marauder)
@@ -758,12 +757,25 @@ def main(argv):
                     step_reward += 10.0
                     print(f"🎯 掠奪者產出！目前進度: {current_real_count}/5")
 
-                MAX_GAME_LOOP = 26880 # 👉 20 分鐘上限
-                # 3.終局判定：由「幀數」主導的勝負邏輯
+                MAX_GAME_LOOP = 13440 # 👉 20 分鐘上限
                 current_loop = int(next_obs.observation.game_loop[0])
-                
-                # 🌟 修正結束條件：移除 5 隻的限制，現在只有遊戲結束或超時才會停！
-                done = next_obs.last() or current_loop >= 13440
+
+                # ==========================================
+                # 🥊 新增：TKO (技術性擊倒) 判定機制
+                # ==========================================
+                # PySC2 的 score_cumulative 陣列中，索引 5 是殺敵總值，索引 6 是摧毀建築總值
+                killed_units_score = int(next_obs.observation.score_cumulative[5])
+                killed_structures_score = int(next_obs.observation.score_cumulative[6])
+
+                # ✨ 如果摧毀了任何敵方建築，或是殺死了夠多敵人 (例如價值 > 500)，就代表對面已經崩潰投降了！
+                is_tko_victory = (killed_structures_score > 0) or (killed_units_score > 500)
+
+                if is_tko_victory and "tko_triggered" not in achieved_milestones:
+                    achieved_milestones.add("tko_triggered")
+                    print(f"🥊 [TKO 擊倒對手！] 摧毀建築得分: {killed_structures_score}, 殺敵得分: {killed_units_score}")
+
+                # 🌟 修正結束條件：加入 is_tko_victory，只要打爆對面就提早收工！
+                done = next_obs.last() or current_loop >= MAX_GAME_LOOP or is_tko_victory
 
                 # ==========================================
                 # 🏆 實戰里程碑結算 (取代原本的終局結算)
@@ -785,6 +797,7 @@ def main(argv):
                         step_reward -= 20.0
                         print(f"❌ 任務失敗：20 分鐘耗盡仍未湊齊，最終懲罰 -20.0")
 
+                pending_reward += step_reward
                 # ==========================================
                 # ⚠️ 第二步：分數壓縮 (Normalization)
                 # ==========================================
@@ -869,8 +882,15 @@ def main(argv):
                     # 👉 新增這行：把這整局的連續記憶打包存進一般記憶庫
                     memory.append(episode_memory) 
 
-                    if current_real_count >= 5:
+                    # ✨ 核心修改：判斷遊戲是否取得「勝利」或是「TKO 擊倒」
+                    if next_obs.reward == 1 or is_tko_victory:
+                        
+                        # 如果是我們手動判定的 TKO，我們直接補上勝利的 1.0 分！
+                        if is_tko_victory:
+                            total_reward += 1.0 
+
                         success_memory.append((total_reward, episode_memory))
+                        # 依照總分 (時間獎勵) 從高到低排序，保留最速通關的紀錄
                         success_memory.sort(key=lambda x: x[0], reverse=True)
                         
                         if len(success_memory) > MAX_ELITE_MEMORY:
@@ -941,8 +961,11 @@ def main(argv):
                             if key == "techlab" and exists: final_t_count = 1
                     
                     # 4. 寫入 CSV 紀錄
+                    # 如果是 TKO，在任務名稱加上標記，讓你知道它是提早打爆對手收工的
+                    final_task_name = "掠奪者任務 (TKO!)" if is_tko_victory else "掠奪者任務"
+                    
                     print(f"!!! 即將寫入 CSV 的分數是: {episode_reward} (型別: {type(episode_reward)})")
-                    logger.log_episode(ep + 1, "掠奪者任務", epsilon, float(episode_reward), current_loop, current_real_count, marine_count)
+                    logger.log_episode(ep + 1, final_task_name, epsilon, float(episode_reward), current_loop, current_real_count, marine_count)
                     print(f"✅ 已手動強制寫入 CSV: {episode_reward:.4f}")
                     break # ✨ 記得加上 break 跳出 while 迴圈
 
