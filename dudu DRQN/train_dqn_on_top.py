@@ -13,6 +13,7 @@ import pickle
 import threading # 加上這行
 import copy
 import math
+import pygame
 
 import os
 os.environ["SC2PATH"] = r"D:\StarCraft II"
@@ -211,6 +212,11 @@ def main(argv):
     # 一般記憶：維持 deque，只記住最近 300 局的真實血淚史
     memory = deque(maxlen=500) 
 
+    RENDER_UI = True # 總開關
+    pygame.init()
+    screen = pygame.display.set_mode((850, 650)) # 稍微加寬一點
+    pygame.display.set_caption("DRQN 決策中樞 - 中文化遮罩版")
+    
     # 菁英記憶：改成 List，用來做排行榜
     success_memory = [] 
     MAX_ELITE_MEMORY = 300 # 設定排行榜最多收錄 1000 局
@@ -254,6 +260,140 @@ def main(argv):
 
     epsilon = 1.00; epsilon_decay = 0.995; gamma = 0.998
 
+    def draw_dual_head_network(surface, model, state_vector, allowed_indices, hidden_state=None):
+        import numpy as np
+        import torch
+
+        # 1. 畫布基礎設定：乾淨的白底與中文字體
+        surface.fill((250, 250, 250)) 
+        # 列出常見的中文字體名稱清單，程式會按順序嘗試
+        font_candidates = [
+            'microsoftjhenghei',    # 微軟正黑體 (Windows)
+            'microsoftyahei',       # 微软雅黑 (Windows)
+            'simhei',               # 黑體 (Windows/Linux)
+            'msgothic',             # MS Gothic (通用)
+            'arialunicode',         # Arial Unicode
+            'stheitilight'          # 華文細黑 (macOS)
+        ]
+        font = None
+        for f_name in font_candidates:
+            try:
+                # 嘗試載入字體
+                test_font = pygame.font.SysFont(f_name, 13, bold=True)
+                # 測試是否能渲染中文 (若失敗通常會回退到預設，這裡我們檢查名稱)
+                font = test_font
+                break
+            except:
+                continue
+                
+        if font is None:
+            font = pygame.font.SysFont("arial", 13) # 最後的備案
+        
+        num_font = pygame.font.SysFont("arial", 10)
+
+        # 🏷️ 變數名稱中文化 (維持 18 維輸入與 11 種動作) [cite: 253]
+        input_labels = ["工兵總數", "閒置工兵", "晶礦比例", "瓦斯比例", "資源差距", "目前人口", 
+                        "剩餘人口", "補給站數", "瓦斯廠數", "軍營數量", "科技室數", "選中工兵", 
+                        "選中主堡", "選中兵營", "陸戰隊數", "掠奪者數", "成功與否", "時間進度"]
+        
+        action_labels = ["蓋補給站", "蓋兵營", "蓋瓦斯廠", "造工兵", "造陸戰隊", 
+                        "造掠奪者", "兵營升級", "自動採礦", "指派採瓦斯", "發呆休息", "主堡編隊"]
+            # 2. 獲取當前決策狀態
+        device = next(model.parameters()).device
+        model.eval()
+        with torch.no_grad():
+            state_t = torch.FloatTensor(np.array(state_vector)).unsqueeze(0).to(device)
+            if hidden_state is None:
+                hidden_state = (torch.zeros(1, 1, 128).to(device), torch.zeros(1, 1, 128).to(device))
+            
+            q_actions, _, _ = model(state_t, hidden_state)
+            q_vals = q_actions.cpu().numpy()[0]
+            # 找出當前 AI 最想做的動作 (需在合法名單中)
+            best_action_idx = int(np.argmax(q_vals))
+
+        # 3. 座標佈局
+        in_pos = [(180, y * 30 + 50) for y in range(18)]
+        hid_pos = [(400, y * 34 + 80) for y in range(16)] 
+        act_pos = [(620, y * 38 + 60) for y in range(11)]
+
+        # 4. 提取權重矩陣
+        fc1_w = model.fc1.weight.data.cpu().numpy()
+        act_w = model.fc_action.weight.data.cpu().numpy()
+
+        # 🌟 5. 繪製連線 (Top-K 強制稀疏化實線)
+        # A. 輸入 -> 隱藏層
+        for h_idx in range(16):
+            actual_h = h_idx * 8
+            weights = fc1_w[actual_h, :]
+            top_2_inputs = np.argsort(np.abs(weights))[-2:]
+            for i in range(18):
+                w = weights[i]
+                if i in top_2_inputs and abs(w) > 0.1:
+                    color = (0, 0, 220) if w > 0 else (220, 0, 0)
+                    active_multiplier = 2.0 if state_vector[i] > 0.1 else 0.5
+                    width = max(1, int(abs(w) * 4 * active_multiplier))
+                    pygame.draw.line(surface, color, in_pos[i], hid_pos[h_idx], width)
+
+        # B. 隱藏層 -> 動作層
+        for a_idx in range(11):
+            weights = act_w[a_idx, :]
+            sampled_weights = [weights[h * 8] for h in range(16)]
+            top_2_hidden = np.argsort(np.abs(sampled_weights))[-2:]
+            
+            # 💡 如果該動作不在合法名單中，不畫連線，代表訊號被中斷
+            if a_idx not in allowed_indices: continue
+
+            for h_idx in range(16):
+                actual_h = h_idx * 8
+                w = act_w[a_idx, actual_h]
+                if h_idx in top_2_hidden and abs(w) > 0.1:
+                    color = (0, 0, 220) if w > 0 else (220, 0, 0)
+                    is_active_path = (a_idx == best_action_idx)
+                    width = max(1, int(abs(w) * (6 if is_active_path else 2)))
+                    pygame.draw.line(surface, color, hid_pos[h_idx], act_pos[a_idx], width)
+
+        # 🎨 6. 節點渲染
+        def draw_neat_node(pos, label, num, side="left", active_val=0, is_best=False, is_masked=False):
+            # 決定顏色
+            if is_masked:
+                fill_color = (80, 80, 80)    # 🌑 被遮罩擋住：深灰色
+                border_color = (40, 40, 40)
+                text_color = (150, 150, 150)
+            elif is_best:
+                fill_color = (180, 180, 255) # 🔵 最終決策：淺藍色
+                border_color = (0, 0, 0)
+                text_color = (0, 0, 0)
+            elif active_val > 0.1:
+                fill_color = (200, 255, 200) # 🟢 活躍輸入：淺綠色
+                border_color = (0, 0, 0)
+                text_color = (0, 0, 0)
+            else:
+                fill_color = (255, 255, 255) # ⚪ 一般狀態：白色
+                border_color = (50, 50, 50)
+                text_color = (0, 0, 0)
+
+            pygame.draw.circle(surface, fill_color, pos, 13)
+            pygame.draw.circle(surface, border_color, pos, 13, 2)
+            
+            n_txt = num_font.render(str(num), True, text_color)
+            surface.blit(n_txt, (pos[0]-n_txt.get_width()//2, pos[1]-n_txt.get_height()//2))
+            
+            if label:
+                l_txt = font.render(label, True, (0, 0, 0) if not is_masked else (150, 150, 150))
+                x_off = -105 if side == "left" else 25
+                surface.blit(l_txt, (pos[0] + x_off, pos[1] - 8))
+
+        # 執行渲染
+        for i, pos in enumerate(in_pos):
+            draw_neat_node(pos, input_labels[i], i, "left", state_vector[i])
+        for i, pos in enumerate(hid_pos):
+            draw_neat_node(pos, None, i + 100)
+        for i, pos in enumerate(act_pos):
+            # 💡 判斷是否被遮罩擋住
+            is_masked = (i not in allowed_indices)
+            draw_neat_node(pos, action_labels[i], i, "right", 0, 
+                        is_best=(i == best_action_idx and not is_masked), 
+                        is_masked=is_masked)
     def get_action_mask(target_obs):
         """ 根據當前畫面狀態，回傳合法的 Action 索引列表 """
         player = target_obs.observation.player
@@ -574,6 +714,11 @@ def main(argv):
                 obs_list = env.step([sc2_action, actions.FUNCTIONS.no_op()])
                 next_obs = obs_list[0]
                 next_allowed_indices = get_action_mask(next_obs)
+
+                if RENDER_UI and train_step_counter % 2 == 0:
+                    # 傳入當前狀態與合法動作清單
+                    draw_dual_head_network(screen, brain_model, state, allowed_indices, hidden_state)
+                    pygame.display.flip()
 
                 if sc2_action.function != 0:
                     current_action_success = 1.0
