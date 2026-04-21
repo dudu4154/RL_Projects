@@ -715,8 +715,16 @@ def main(argv):
                 next_obs = obs_list[0]
                 next_allowed_indices = get_action_mask(next_obs)
 
+                # ... 在你的訓練迴圈內 ...
+
                 if RENDER_UI and train_step_counter % 2 == 0:
-                    # 傳入當前狀態與合法動作清單
+                    # ✨ 核心修正：加入這兩行，讓視窗學會「聽話」
+                    for event in pygame.event.get():
+                        if event.type == pygame.QUIT:
+                            pygame.quit()
+                            return # 讓你可以手動關閉視窗結束訓練
+
+                    # 執行原本的繪圖
                     draw_dual_head_network(screen, brain_model, state, allowed_indices, hidden_state)
                     pygame.display.flip()
 
