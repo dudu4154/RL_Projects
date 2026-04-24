@@ -43,12 +43,14 @@ class DataCollector:
             writer = csv.writer(file)
             writer.writerow(["Time", "Minerals", "Vespene", "Workers", "Ideal", "Barracks", "Action_ID"])
 
-    def log_step(self, time_val, minerals, vespene, workers, ideal, barracks, action_id):
+    # 👉 參數加上 p_id (預設給 0 避免其他地方呼叫報錯)
+    def log_step(self, time_val, minerals, vespene, workers, ideal, barracks, action_id, p_id=0):
         """ 將當前的遊戲數據寫入 CSV """
         display_time = float(time_val[0]) if hasattr(time_val, "__len__") else float(time_val)
         with open(self.filename, mode='a', newline='') as file:
             writer = csv.writer(file)
-            writer.writerow([round(display_time, 2), minerals, vespene, workers, ideal, barracks, action_id])
+            # 👉 寫入陣列加上 p_id
+            writer.writerow([round(display_time, 2), minerals, vespene, workers, ideal, barracks, action_id, p_id])
 
 # =========================================================
 # 🧠 生產大腦: 整合所有功能與修正
@@ -74,10 +76,10 @@ class ProductionAI:
             return obs.observation.single_select[0].unit_type == SCV_ID
         
         # 檢查複數選取：同樣使用 len()
-        if len(obs.observation.multi_select) > 0:
-            # 只要選取的清單中包含任何一個工兵，就視為已選中
-            return any(u.unit_type == SCV_ID for u in obs.observation.multi_select)
-            
+        if len(obs.observation.single_select) > 0:
+            # 這裡不能只檢查 SCV_ID，因為抱著礦的工兵 ID 可能會變
+            u_type = obs.observation.single_select[0].unit_type
+            return u_type in [45, 104, 105, 106, 107]
         return False
     
     #尋找畫面上所有指定 ID 建築的中心點。
@@ -95,6 +97,25 @@ class ProductionAI:
             temp_x = [px for i, px in enumerate(temp_x) if not mask[i]]
             temp_y = [py for i, py in enumerate(temp_y) if not mask[i]]
         return centers
+    
+    def step(self, obs, rl_action=None, parameter=None):
+        # ✨ 核心修正：讓時間流動，打破無限死鎖
+        if self.locked_action is not None:
+            self.lock_timer -= 1
+            if self.lock_timer < 0:
+                self.locked_action = None # 強制解鎖
+                self.lock_timer = 0
+
+        # 2. 修正 10x10 網格坐標系 (約 140 行)
+        # 確保神經網路輸出 0-99 能對應到畫面的每個角落
+        p_idx = max(0, self.active_parameter - 1) % 100
+        row, col = p_idx // 10, p_idx % 10
+        
+        # 10x10 網格間距約 8.5 像素，完美覆蓋 84x84
+        offset_x = (col - 4.5) * 8.5
+        offset_y = (row - 4.5) * 8.5
+        target_pos = (np.clip(self.cc_x_screen + offset_x, 5, 78), 
+                    np.clip(self.cc_y_screen + offset_y, 5, 78))
 
     def get_action(self, obs, action_id, parameter=None):
         # --- 處理鎖定與超時 ---
@@ -141,13 +162,13 @@ class ProductionAI:
 
         # --- 🎯 自由位置坐標系 ---
         grid_size = 8
-        p_idx = max(0, self.active_parameter - 1) % 64
-        row = p_idx // 8
-        col = p_idx % 8
-        
-        # 將 0-7 的網格轉化為相對於主堡的偏移 (-35 到 +35)
-        offset_x = (col - 3.5) * 10 
-        offset_y = (row - 3.5) * 10
+        p_idx = max(0, self.active_parameter - 1) % 100 # 👉 改成 100
+        row = p_idx // 10  # 👉 除以 10
+        col = p_idx % 10   # 👉 除以 10
+
+        # 計算相對於中心的偏移 (10格代表中心是 4.5)
+        offset_x = (col - 4.5) * 8  # 👉 間距可以縮小為 8 像素
+        offset_y = (row - 4.5) * 8
         
         # 最終座標 = 主堡中心 + 偏移量
         tx = self.cc_x_screen + offset_x
@@ -822,35 +843,48 @@ class ProductionAI:
                           np.clip(int((r + 0.5) * 8), 0, 63))
             return actions.FUNCTIONS.move_camera(target_pos)
         
-       # [Action 41] 經濟重啟修正 (智慧打散工兵)
+       
+        # ==========================================
+        # [Action 41] 經濟重啟 (派遣閒置工兵去採礦 - 終極穩定版)
+        # ==========================================
         elif action_id == 41:
-            # 1. 沒空閒工兵，且沒選中任何工兵 -> 沒事做
-            if player.idle_worker_count == 0 and not self._is_scv_selected(obs):
+            # 1. 沒事做判定：如果系統判定沒有閒置工兵，直接解除鎖定並放棄
+            if player.idle_worker_count == 0:
                 self.locked_action = None
                 return actions.FUNCTIONS.no_op()
 
-            # 2. 如果已經成功選中工兵
-            if self._is_scv_selected(obs):
-                # ✨ 核心修正：利用現有函式找出「每一塊」礦脈的中心點，而不是全部平均
-                mineral_centers = self._find_units_centers(unit_type, MINERAL_FIELD_ID)
-                
-                # A. 如果畫面上看得到礦
-                if mineral_centers and actions.FUNCTIONS.Smart_screen.id in available:
-                    # ✨ 隨機指派到其中一塊礦脈，避免所有工兵擠在同一顆礦上排隊
-                    target = random.choice(mineral_centers)
-                    self.locked_action = None 
-                    self.lock_timer = 0
-                    #print(f"⛏️ [DEBUG] 指派閒置工兵去採礦！目標: {target}")
-                    return actions.FUNCTIONS.Smart_screen("now", target)
-                
-                # B. 畫面上沒礦 (可能剛蓋完房子人在外面) -> 移回基地
-                else:
-                    self.locked_action = 41 
-                    if actions.FUNCTIONS.move_camera.id in available:
-                        return actions.FUNCTIONS.move_camera(self._get_home_pos())
-                    return actions.FUNCTIONS.no_op()
+            # 2. 狀態 B：已經在鎖定狀態中 (等待 UI 反應 或 準備下達採集)
+            if self.locked_action == 41:
+                # 確定 UI 已經成功切換到這隻工兵了
+                if self._is_scv_selected(obs):
+                    mineral_centers = self._find_units_centers(unit_type, MINERAL_FIELD_ID)
+                    
+                    # A. 畫面上看得到晶礦
+                    if mineral_centers:
+                        target = random.choice(mineral_centers)
+                        self.locked_action = None 
+                        self.lock_timer = 0
+                        
+                        # ✨ 保底卸貨：如果他剛好抱著東西發呆，先讓他交礦
+                        if actions.FUNCTIONS.Harvest_Return_quick.id in available:
+                            return actions.FUNCTIONS.Harvest_Gather_screen("now", target)
+                            
+                        # ✨ 容錯採集：使用自帶磁吸效應的採集指令，避免點到地板
+                        if actions.FUNCTIONS.Harvest_Gather_screen.id in available:
+                            return actions.FUNCTIONS.Harvest_Gather_screen("now", target)
+                        elif actions.FUNCTIONS.Smart_screen.id in available:
+                            return actions.FUNCTIONS.Smart_screen("now", target)
+                    
+                    # B. 畫面上沒礦 (工兵可能在外面蓋完房子發呆)
+                    else:
+                        # 保持鎖定，先把視角切回主堡，下一幀畫面上有礦了就會執行 A
+                        if actions.FUNCTIONS.move_camera.id in available:
+                            return actions.FUNCTIONS.move_camera(self._get_home_pos())
+                            
+                # ✨ 如果 UI 還沒更新 (頭像還沒出來)，就原地發呆等待！絕對不能往下走！
+                return actions.FUNCTIONS.no_op()
             
-            # 3. 如果還沒選中工兵 -> 點擊左下角選取
+            # 3. 狀態 A：第一幀啟動 (點擊左下角的閒置工兵按鈕)
             if actions.FUNCTIONS.select_idle_worker.id in available:
                 self.locked_action = 41
                 self.lock_timer = 1
@@ -858,22 +892,45 @@ class ProductionAI:
                 
             return actions.FUNCTIONS.no_op()
         
-        # [Action 42] 派遣工兵採集瓦斯 (加入可用性檢查)
+        # ==========================================
+        # [Action 42] 派遣工兵採集瓦斯 (精準計數 + 3人硬上限版)
+        # ==========================================
         elif action_id == 42:
             refinery_centers = self._find_units_centers(unit_type, REFINERY_ID)
-            if not refinery_centers or self.gas_workers_assigned >= len(refinery_centers) * 3:
-                self.locked_action = None; return actions.FUNCTIONS.no_op()
-
-            if self.locked_action == 42 and self.lock_timer > 0 and self._is_scv_selected(obs):
-                # ✨ 核心修正：加入 Smart_screen.id in available 判定
-                if actions.FUNCTIONS.Smart_screen.id in available:
-                    target = random.choice(refinery_centers)
-                    self.gas_workers_assigned += 1 
-                    self.locked_action = None; self.lock_timer = 0
-                    return actions.FUNCTIONS.Smart_screen("now", target)
             
-            self.locked_action = 42; self.lock_timer = 1
+            # ✨ 防護 1：如果沒瓦斯廠，或已經滿編 (每座廠 3 人)，直接強制放棄！
+            # 使用 getattr 避免初始化忘記宣告變數而報錯
+            if not refinery_centers or getattr(self, 'gas_workers_assigned', 0) >= len(refinery_centers) * 3:
+                self.locked_action = None
+                return actions.FUNCTIONS.no_op()
+
+            if self.locked_action == 42:
+                # 等待 UI 頭像出現
+                if self._is_scv_selected(obs):
+                    target = random.choice(refinery_centers)
+                    self.locked_action = None
+                    self.lock_timer = 0
+                    
+                    # ✨ 防護 2：只有在「真正下達採集指令」的這一瞬間，才把計數器 +1！
+                    # 這樣就絕對不會發生「點到地板卻以為有去採」的 UI 幻覺了
+                    self.gas_workers_assigned = getattr(self, 'gas_workers_assigned', 0) + 1
+                    
+                    if actions.FUNCTIONS.Harvest_Return_quick.id in available:
+                        return actions.FUNCTIONS.Harvest_Gather_screen("now", target)
+                    
+                    if actions.FUNCTIONS.Harvest_Gather_screen.id in available:
+                        return actions.FUNCTIONS.Harvest_Gather_screen("now", target)
+                    elif actions.FUNCTIONS.Smart_screen.id in available:
+                        return actions.FUNCTIONS.Smart_screen("now", target)
+                
+                # 如果 UI 還沒出來，乖乖等待
+                return actions.FUNCTIONS.no_op()
+            
+            # 狀態 A：第一幀啟動 (抓取工兵並鎖定)
+            self.locked_action = 42
+            self.lock_timer = 10
             return self._select_mineral_worker(obs, unit_type, available)
+        
         elif action_id == 43:
             # 1. 判斷敵方基地坐標 (基於你目前的 base_location_code)
             # 如果我方在左上 (0)，敵方就在右下；反之亦然
@@ -987,62 +1044,101 @@ class ProductionAI:
     # --- 修改後的選取工兵邏輯 ---
 
     def _select_scv_prioritized(self, obs, unit_type, available):
-        """ 基礎選人：空閒 > 採礦 > 採瓦斯 """
-        if actions.FUNCTIONS.select_idle_worker.id in available:
-            return actions.FUNCTIONS.select_idle_worker("select")
-            
+        """ 職業選手視角：把採瓦斯的工兵放到絕對最後順位 """
         y, x = (unit_type == SCV_ID).nonzero()
-        
-        # --- 核心修正：防止畫面上沒有 SCV 時導致報錯 ---
+
+        # 🛡️ 1. 如果畫面上連半隻工兵都沒有，立刻把視角切回主堡
         if not x.any():
             return actions.FUNCTIONS.move_camera(self._get_home_pos())
-        
-        # 優先抓礦工 (距離礦脈 12 像素內)
+
         m_y, m_x = (unit_type == MINERAL_FIELD_ID).nonzero()
-        if m_x.any():
-            for i in range(len(x)):
-                dist = np.min(np.sqrt((m_x - x[i])**2 + (m_y - y[i])**2))
-                if dist < 12: return actions.FUNCTIONS.select_point("select", (x[i], y[i]))
-        
-        # 沒礦工才隨機抓
-        idx = random.randint(0, len(x) - 1)
-        return actions.FUNCTIONS.select_point("select", (x[idx], y[idx]))
+        r_y, r_x = (unit_type == REFINERY_ID).nonzero()
+
+        mineral_workers = []
+        safe_workers = []
+        gas_workers = []
+
+        # 對畫面上的每一隻工兵進行「身家調查」
+        for i in range(len(x)):
+            px, py = x[i], y[i]
+            is_gas_worker = False
+
+            # 檢查這隻工兵是不是在瓦斯廠附近 (距離 < 12 像素)
+            if r_x.any():
+                dist_r = np.min(np.sqrt((r_x - px)**2 + (r_y - py)**2))
+                if dist_r < 12:
+                    is_gas_worker = True
+
+            if is_gas_worker:
+                gas_workers.append((px, py)) # 打入最後冷宮
+            else:
+                safe_workers.append((px, py)) # 至少是安全的
+                # 如果不是瓦斯工，再檢查是不是純礦工 (距離礦脈 < 15 像素)
+                if m_x.any():
+                    dist_m = np.min(np.sqrt((m_x - px)**2 + (m_y - py)**2))
+                    if dist_m < 15:
+                        mineral_workers.append((px, py))
+
+        # 🏆 志願序 1：純礦工 (在礦脈旁，且保證遠離瓦斯廠)
+        if mineral_workers:
+            target = random.choice(mineral_workers)
+            return actions.FUNCTIONS.select_point("select", target)
+
+        # 💤 志願序 2：閒置工兵
+        if actions.FUNCTIONS.select_idle_worker.id in available:
+            return actions.FUNCTIONS.select_idle_worker("select")
+
+        # 🏃 志願序 3：沒在採瓦斯，只是在畫面上亂跑的工兵
+        if safe_workers:
+            target = random.choice(safe_workers)
+            return actions.FUNCTIONS.select_point("select", target)
+
+        # ⛽ 絕對最後順位：畫面上只剩下瓦斯工兵了，不抓他就會卡死，只好抓了
+        if gas_workers:
+            target = random.choice(gas_workers)
+            return actions.FUNCTIONS.select_point("select", target)
+
+        return actions.FUNCTIONS.no_op()
     def _select_mineral_worker(self, obs, unit_type, available):
-        """ 專門尋找「遠離瓦斯」且「靠近礦脈」的工兵 """
+        """ 修正版：放寬距離判定，並增加保底選取，確保一定能抓到人去採瓦斯 """
+        # 1. 優先按空閒工兵按鈕 (最快)
         if actions.FUNCTIONS.select_idle_worker.id in available:
             return actions.FUNCTIONS.select_idle_worker("select")
         
         scv_y, scv_x = (unit_type == SCV_ID).nonzero()
+        if not scv_x.any(): return actions.FUNCTIONS.no_op()
+
         m_y, m_x = (unit_type == MINERAL_FIELD_ID).nonzero()
         r_y, r_x = (unit_type == REFINERY_ID).nonzero()
-        
-        
 
         candidates = []
         for i in range(len(scv_x)):
-            # 條件 1: 靠近礦脈 (距離 < 10)
+            px, py = scv_x[i], scv_y[i]
+            
+            # ✨ 修正 1：放寬距離判定。距離礦脈 15 像素內都算候選人 (原本是 10)
             is_near_min = False
             if m_x.any():
-                dist_m = np.min(np.sqrt((m_x - scv_x[i])**2 + (m_y - scv_y[i])**2))
-                if dist_m < 10: is_near_min = True
+                dist_m = np.min(np.sqrt((m_x - px)**2 + (m_y - py)**2))
+                if dist_m < 15: is_near_min = True
             
-            # 條件 2: 必須「遠離」任何瓦斯廠 (距離 > 12)
-            # 這是防止選到已經在瓦斯廠工作的工兵的關鍵
+            # 確保他不是已經在瓦斯廠的工兵
             is_not_gas_worker = True
             if r_x.any():
-                dist_r = np.min(np.sqrt((r_x - scv_x[i])**2 + (r_y - scv_y[i])**2))
+                dist_r = np.min(np.sqrt((r_x - px)**2 + (r_y - py)**2))
                 if dist_r < 12: is_not_gas_worker = False
             
             if is_near_min and is_not_gas_worker:
-                candidates.append((scv_x[i], scv_y[i]))
+                candidates.append((px, py))
 
+        # 2. 如果有找到合適的礦工，隨機挑一個
         if candidates:
-            # 從礦工中隨機選一個
             target = random.choice(candidates)
             return actions.FUNCTIONS.select_point("select", target)
         
-        # 如果真的沒找到純礦工，回傳 no_op 等待下一幀，不要亂抓
-        return actions.FUNCTIONS.no_op()
+        # ✨ 修正 2：保底機制。如果沒找到完美礦工，就隨便在畫面上抓一隻工兵！
+        # 這樣可以防止 Action 42 卡死在鎖定狀態
+        idx = random.randint(0, len(scv_x) - 1)
+        return actions.FUNCTIONS.select_point("select", (scv_x[idx], scv_y[idx]))
     def _calc_barracks_pos(self, obs):
         """ 修正版：根據指揮中心位置動態計算兵營座標，確保右側空間 """
         global BASE_LOCATION_CODE  # 宣告使用全域變數
@@ -1109,7 +1205,7 @@ def main(argv):
             print("--- 啟動新對局 ---")
             obs_list = env.reset()
             while True:
-                action_id = 45 #random.choice([1,47])#1#random.randint(1, 41)
+                action_id = 41 #random.choice([1,47])#1#random.randint(1, 41)
                 param = random.randint(1, 64)#1# # 網格限制 1-16
                 
                 sc2_action = agent.get_action(obs_list[0], action_id, parameter=param)

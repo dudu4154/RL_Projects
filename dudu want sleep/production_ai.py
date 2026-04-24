@@ -887,20 +887,30 @@ class ProductionAI:
             return actions.FUNCTIONS.no_op()
         
         # [Action 42] 派遣工兵採集瓦斯 (加入可用性檢查)
+        # [Action 42] 派遣工兵採集瓦斯 (信任神經網路，移除盲目計數)
         elif action_id == 42:
             refinery_centers = self._find_units_centers(unit_type, REFINERY_ID)
-            if not refinery_centers or self.gas_workers_assigned >= len(refinery_centers) * 3:
-                self.locked_action = None; return actions.FUNCTIONS.no_op()
+            
+            # ✨ 修正 1：拔除 gas_workers_assigned 限制，只要有瓦斯廠就可以派人！
+            if not refinery_centers:
+                self.locked_action = None
+                return actions.FUNCTIONS.no_op()
 
             if self.locked_action == 42 and self.lock_timer > 0 and self._is_scv_selected(obs):
-                # ✨ 核心修正：加入 Smart_screen.id in available 判定
-                if actions.FUNCTIONS.Smart_screen.id in available:
-                    target = random.choice(refinery_centers)
-                    self.gas_workers_assigned += 1 
-                    self.locked_action = None; self.lock_timer = 0
+                target = random.choice(refinery_centers)
+                self.locked_action = None
+                self.lock_timer = 0
+                
+                # ✨ 修正 2：比照採礦，換上容錯率 100% 的「強制採集」指令！
+                if actions.FUNCTIONS.Harvest_Gather_screen.id in available:
+                    return actions.FUNCTIONS.Harvest_Gather_screen("now", target)
+                elif actions.FUNCTIONS.Smart_screen.id in available:
                     return actions.FUNCTIONS.Smart_screen("now", target)
+                    
+                return actions.FUNCTIONS.no_op()
             
-            self.locked_action = 42; self.lock_timer = 1
+            self.locked_action = 42
+            self.lock_timer = 1
             return self._select_mineral_worker(obs, unit_type, available)
         
         # [Action 43] 全選並出動

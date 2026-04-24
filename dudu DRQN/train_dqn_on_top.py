@@ -71,8 +71,8 @@ def patched_data_collector_init(self):
     self.filename = os.path.join(log_dir, f"terran_log_{int(time.time())}.csv")
     with open(self.filename, mode='w', newline='') as file:
         writer = csv.writer(file)
-        # 【同步】加入 Barracks
-        writer.writerow(["Game_Loop", "Minerals", "Vespene", "Workers", "Ideal", "Barracks", "Action_ID"])
+        # 👉 標題最後加上 "P_ID"
+        writer.writerow(["Game_Loop", "Minerals", "Vespene", "Workers", "Ideal", "Barracks", "Action_ID", "P_ID"])
 
 production_ai.DataCollector.__init__ = patched_data_collector_init
 
@@ -121,12 +121,11 @@ class QNetwork(nn.Module):
     def __init__(self, state_size, action_size):
         super(QNetwork, self).__init__()
         self.fc1 = nn.Linear(state_size, 128)
-        
-        # ✨ 植入海馬迴：新增 LSTM 記憶層
         self.lstm = nn.LSTM(input_size=128, hidden_size=128, batch_first=True)
-        
         self.fc_action = nn.Linear(128, action_size)
-        self.fc_param = nn.Linear(128, 64)
+        
+        # ✨ 擴充第二大腦：從 64 改成 100 個神經元，對應 10x10 網格
+        self.fc_param = nn.Linear(128, 100)
 
     # ✨ forward 必須接收上一步的記憶 (hidden)
     def forward(self, x, hidden):
@@ -166,28 +165,33 @@ def get_state_vector(obs, current_block, target_project_id, last_action_id, last
     # 導致 AI 感受到的數值永遠在 0.0~0.1 之間，學習效果很差
     mineral_ratio = min(float(player.minerals) / 400.0, 1.0)
     vespene_ratio = min(float(player.vespene) / 200.0, 1.0)
+    action_ratio = min(float(last_action_id) / 50.0, 1.0) # 假設動作 ID 最大約 50
+    block_ratio = min(float(current_block) / 100.0, 1.0)   # 區塊範圍是 1~64
 
 
     state_list = [
         min(float(player.food_workers) / 22.0, 1.0),                      # 1. 工兵總數
         min(float(player.idle_worker_count) / 10.0, 1.0),                 # 2. 閒置工兵
-        mineral_ratio,                                                      # 3. 晶礦比例
-        vespene_ratio,                                                      # 4. 瓦斯比例
-        mineral_ratio - vespene_ratio,                                      # 5. 資源差距
+        mineral_ratio,                                                    # 3. 晶礦比例
+        vespene_ratio,                                                    # 4. 瓦斯比例
+        mineral_ratio - vespene_ratio,                                    # 5. 資源差距
         min(float(player.food_used) / 200.0, 1.0),                        # 6. 目前人口
         min(float(player.food_cap - player.food_used) / 20.0, 1.0),       # 7. 剩餘人口空間
         min(float(count_unit(19)) / 3.0, 1.0),                            # 8. 補給站數量
         min(float(count_unit(20)) / 2.0, 1.0),                            # 9. 瓦斯廠數量
         min(float(count_unit(21)) / 2.0, 1.0),                            # 10. 軍營數量
         min(float(count_unit(37)) / 1.0, 1.0),                            # 11. 科技室數量
-        min(float(is_scv_selected), 1.0),                                  # 12. 選中工兵
-        min(float(is_cc_selected), 1.0),                                   # 13. 選中主堡
-        min(float(is_barracks_selected), 1.0),                             # 14. 選中兵營
-        min(float(count_unit(48)) / 50.0, 1.0),                           # 15. 陸戰隊數量（保留）
+        min(float(is_scv_selected), 1.0),                                 # 12. 選中工兵
+        min(float(is_cc_selected), 1.0),                                  # 13. 選中主堡
+        min(float(is_barracks_selected), 1.0),                            # 14. 選中兵營
+        min(float(count_unit(48)) / 50.0, 1.0),                           # 15. 陸戰隊數量
         min(float(count_unit(51)) / 5.0, 1.0),                            # 16. 掠奪者數量
-        min(float(last_action_success), 1.0),                              # 17. 上一動作成功與否
-        min(float(current_loop) / 13440.0, 1.0)                           # 18. 遊戲時間進度
+        min(float(last_action_success), 1.0),                             # 17. 上一動作成功與否
+        action_ratio,                                                     # 🌟 18. 上一動作 ID
+        block_ratio,                                                      # 🌟 19. 上一執行區塊
+        min(float(current_loop) / 13440.0, 1.0)                           # 20. 遊戲時間進度
     ]
+
     return state_list
 
 
@@ -198,8 +202,8 @@ def get_state_vector(obs, current_block, target_project_id, last_action_id, last
 def main(argv):
     
     del argv
-    #state_size = 17
-    state_size = 18
+    
+    state_size = 20
     IS_TRAINING = True
     VALID_ACTIONS = [1, 2, 11, 14, 16, 18, 34, 41, 42, 44, 45]
     action_size = len(VALID_ACTIONS)
@@ -214,7 +218,7 @@ def main(argv):
 
     RENDER_UI = True # 總開關
     pygame.init()
-    screen = pygame.display.set_mode((850, 650)) # 稍微加寬一點
+    screen = pygame.display.set_mode((1200, 700))
     pygame.display.set_caption("DRQN 決策中樞 - 中文化遮罩版")
     
     # 菁英記憶：改成 List，用來做排行榜
@@ -258,47 +262,52 @@ def main(argv):
         target_model.load_state_dict(brain_model.state_dict())
         print("✅ 載入成功！接續之前的記憶繼續訓練...")
 
-    epsilon = 1.00; epsilon_decay = 0.995; gamma = 0.998
+    epsilon = 0.01; epsilon_decay = 0.995; gamma = 0.998
 
     def draw_dual_head_network(surface, model, state_vector, allowed_indices, hidden_state=None):
         import numpy as np
         import torch
+        import pygame
 
-        # 1. 畫布基礎設定：乾淨的白底與中文字體
-        surface.fill((250, 250, 250)) 
-        # 列出常見的中文字體名稱清單，程式會按順序嘗試
-        font_candidates = [
-            'microsoftjhenghei',    # 微軟正黑體 (Windows)
-            'microsoftyahei',       # 微软雅黑 (Windows)
-            'simhei',               # 黑體 (Windows/Linux)
-            'msgothic',             # MS Gothic (通用)
-            'arialunicode',         # Arial Unicode
-            'stheitilight'          # 華文細黑 (macOS)
-        ]
+        # ==========================================
+        # ✨ 畫質革命：SSAA 超採樣反鋸齒設定
+        # ==========================================
+        SCALE = 2  
+        sw, sh = surface.get_size()
+        hq_surface = pygame.Surface((sw * SCALE, sh * SCALE))
+        
+        # 🎨 1. 賽博龐克背景色：極深的深藍/黑色
+        hq_surface.fill((10, 12, 18)) 
+        
+        # 嘗試載入支援中文的字體
+        font_candidates = ['microsoftjhenghei', 'microsoftyahei', 'simhei', 'msgothic', 'arialunicode']
         font = None
         for f_name in font_candidates:
             try:
-                # 嘗試載入字體
-                test_font = pygame.font.SysFont(f_name, 13, bold=True)
-                # 測試是否能渲染中文 (若失敗通常會回退到預設，這裡我們檢查名稱)
+                test_font = pygame.font.SysFont(f_name, 13 * SCALE, bold=True)
                 font = test_font
                 break
             except:
                 continue
-                
         if font is None:
-            font = pygame.font.SysFont("arial", 13) # 最後的備案
-        
-        num_font = pygame.font.SysFont("arial", 10)
+            font = pygame.font.SysFont("arial", 13 * SCALE)
+        num_font = pygame.font.SysFont("arial", 10 * SCALE, bold=True) # 數字加粗更醒目
 
-        # 🏷️ 變數名稱中文化 (維持 18 維輸入與 11 種動作) [cite: 253]
-        input_labels = ["工兵總數", "閒置工兵", "晶礦比例", "瓦斯比例", "資源差距", "目前人口", 
-                        "剩餘人口", "補給站數", "瓦斯廠數", "軍營數量", "科技室數", "選中工兵", 
-                        "選中主堡", "選中兵營", "陸戰隊數", "掠奪者數", "成功與否", "時間進度"]
+        # 🏷️ 變數名稱標準化
+        input_labels = [
+            "工兵總數 (22)", "閒置工兵 (10)", "晶礦比例 (400)", "瓦斯比例 (200)", 
+            "資源差距 (M-V)", "目前人口 (200)", "剩餘人口 (20)", "補給站數 (3)", 
+            "瓦斯廠數 (2)", "軍營數量 (2)", "科技室數 (1)", "選中工兵 (0/1)", 
+            "選中主堡 (0/1)", "選中兵營 (0/1)", "陸戰隊數 (50)", "掠奪者數 (5)", 
+            "上一動作成功", "上一動作ID(50)", "上一次區塊(64)", "時間進度 (13k)" 
+        ]
         
-        action_labels = ["蓋補給站", "蓋兵營", "蓋瓦斯廠", "造工兵", "造陸戰隊", 
-                        "造掠奪者", "兵營升級", "自動採礦", "指派採瓦斯", "發呆休息", "主堡編隊"]
-            # 2. 獲取當前決策狀態
+        action_labels = [
+            "蓋補給站", "蓋兵營", "蓋瓦斯廠", "製造工兵", "造陸戰隊", 
+            "造掠奪者", "兵營升級", "閒置採礦", "指派瓦斯", "發呆休息", "主堡編隊"
+        ]
+
+        # 2. 獲取當前決策狀態
         device = next(model.parameters()).device
         model.eval()
         with torch.no_grad():
@@ -308,93 +317,118 @@ def main(argv):
             
             q_actions, _, _ = model(state_t, hidden_state)
             q_vals = q_actions.cpu().numpy()[0]
-            # 找出當前 AI 最想做的動作 (需在合法名單中)
             best_action_idx = int(np.argmax(q_vals))
 
-        # 3. 座標佈局
-        in_pos = [(180, y * 30 + 50) for y in range(18)]
-        hid_pos = [(400, y * 34 + 80) for y in range(16)] 
-        act_pos = [(620, y * 38 + 60) for y in range(11)]
+        # ==========================================
+        # 3. 座標佈局 (維持寬螢幕比例不變)
+        # ==========================================
+        in_pos = [(150 * SCALE, (y * 30 + 50) * SCALE) for y in range(20)]    
+        fc1_pos = [(400 * SCALE, (y * 40 + 100) * SCALE) for y in range(12)]  
+        lstm_pos = [(750 * SCALE, (y * 40 + 100) * SCALE) for y in range(12)] 
+        act_pos = [(1050 * SCALE, (y * 45 + 100) * SCALE) for y in range(11)] 
 
-        # 4. 提取權重矩陣
         fc1_w = model.fc1.weight.data.cpu().numpy()
+        lstm_w = model.lstm.weight_ih_l0.data.cpu().numpy()[:128, :]
         act_w = model.fc_action.weight.data.cpu().numpy()
 
-        # 🌟 5. 繪製連線 (Top-K 強制稀疏化實線)
-        # A. 輸入 -> 隱藏層
-        for h_idx in range(16):
-            actual_h = h_idx * 8
+        # ==========================================
+        # 5. 繪製連線 (🎨 霓虹螢光配色)
+        # ==========================================
+        
+        # A. 輸入層 -> FC1 特徵層 
+        for h_idx in range(12): 
+            actual_h = h_idx * 10
             weights = fc1_w[actual_h, :]
             top_2_inputs = np.argsort(np.abs(weights))[-2:]
-            for i in range(18):
+            
+            for i in range(20):
                 w = weights[i]
                 if i in top_2_inputs and abs(w) > 0.1:
-                    color = (0, 0, 220) if w > 0 else (220, 0, 0)
+                    # 正權重：霓虹青 (Cyan) / 負權重：賽博粉 (Magenta)
+                    color = (0, 200, 255) if w > 0 else (255, 50, 150)
                     active_multiplier = 2.0 if state_vector[i] > 0.1 else 0.5
-                    width = max(1, int(abs(w) * 4 * active_multiplier))
-                    pygame.draw.line(surface, color, in_pos[i], hid_pos[h_idx], width)
+                    width = max(1, int(abs(w) * 4 * active_multiplier)) * SCALE
+                    pygame.draw.line(hq_surface, color, in_pos[i], fc1_pos[h_idx], width)
 
-        # B. 隱藏層 -> 動作層
+        # B. FC1 特徵層 -> LSTM 記憶層 
+        for j in range(12): 
+            actual_j = j * 10
+            for i in range(12): 
+                actual_i = i * 10
+                w = lstm_w[actual_j, actual_i]
+                abs_w = abs(w)
+                
+                if abs_w > 0.05: 
+                    if w > 0:
+                        # 高權重：亮青色 / 低權重：暗藍綠色
+                        color = (0, 200, 255) if abs_w > 0.15 else (0, 80, 120)
+                    else:
+                        # 高權重：亮粉紅 / 低權重：暗紫紅色
+                        color = (255, 50, 150) if abs_w > 0.15 else (120, 20, 70)
+                    
+                    width = max(1, int(abs_w * 15)) * SCALE
+                    pygame.draw.line(hq_surface, color, fc1_pos[i], lstm_pos[j], width)
+
+        # C. LSTM 記憶層 -> 動作層 
         for a_idx in range(11):
-            weights = act_w[a_idx, :]
-            sampled_weights = [weights[h * 8] for h in range(16)]
-            top_2_hidden = np.argsort(np.abs(sampled_weights))[-2:]
-            
-            # 💡 如果該動作不在合法名單中，不畫連線，代表訊號被中斷
             if a_idx not in allowed_indices: continue
+            
+            weights = act_w[a_idx, :]
+            sampled_weights = [weights[h * 10] for h in range(12)]
+            top_2_hidden = np.argsort(np.abs(sampled_weights))[-2:]
 
-            for h_idx in range(16):
-                actual_h = h_idx * 8
+            for h_idx in range(12):
+                actual_h = h_idx * 10
                 w = act_w[a_idx, actual_h]
                 if h_idx in top_2_hidden and abs(w) > 0.1:
-                    color = (0, 0, 220) if w > 0 else (220, 0, 0)
+                    color = (0, 200, 255) if w > 0 else (255, 50, 150)
                     is_active_path = (a_idx == best_action_idx)
-                    width = max(1, int(abs(w) * (6 if is_active_path else 2)))
-                    pygame.draw.line(surface, color, hid_pos[h_idx], act_pos[a_idx], width)
+                    width = max(1, int(abs(w) * (6 if is_active_path else 2))) * SCALE
+                    pygame.draw.line(hq_surface, color, lstm_pos[h_idx], act_pos[a_idx], width)
 
-        # 🎨 6. 節點渲染
+        # ==========================================
+        # 🎨 6. 節點渲染 (全息科技風格)
+        # ==========================================
         def draw_neat_node(pos, label, num, side="left", active_val=0, is_best=False, is_masked=False):
-            # 決定顏色
             if is_masked:
-                fill_color = (80, 80, 80)    # 🌑 被遮罩擋住：深灰色
-                border_color = (40, 40, 40)
-                text_color = (150, 150, 150)
+                # 被遮罩：極暗灰
+                fill_color, border_color, text_color = (20, 20, 20), (50, 50, 50), (100, 100, 100)
             elif is_best:
-                fill_color = (180, 180, 255) # 🔵 最終決策：淺藍色
-                border_color = (0, 0, 0)
-                text_color = (0, 0, 0)
+                # 最終決策：亮青色發光
+                fill_color, border_color, text_color = (0, 80, 150), (0, 255, 255), (255, 255, 255)
             elif active_val > 0.1:
-                fill_color = (200, 255, 200) # 🟢 活躍輸入：淺綠色
-                border_color = (0, 0, 0)
-                text_color = (0, 0, 0)
+                # 活躍輸入：亮綠色發光
+                fill_color, border_color, text_color = (0, 100, 50), (0, 255, 100), (255, 255, 255)
             else:
-                fill_color = (255, 255, 255) # ⚪ 一般狀態：白色
-                border_color = (50, 50, 50)
-                text_color = (0, 0, 0)
+                # 一般未啟動狀態：深底色搭配暗藍邊框
+                fill_color, border_color, text_color = (15, 20, 25), (40, 80, 120), (200, 200, 200)
 
-            pygame.draw.circle(surface, fill_color, pos, 13)
-            pygame.draw.circle(surface, border_color, pos, 13, 2)
+            radius = 13 * SCALE
+            pygame.draw.circle(hq_surface, fill_color, pos, radius)
+            pygame.draw.circle(hq_surface, border_color, pos, radius, 2 * SCALE)
             
             n_txt = num_font.render(str(num), True, text_color)
-            surface.blit(n_txt, (pos[0]-n_txt.get_width()//2, pos[1]-n_txt.get_height()//2))
+            hq_surface.blit(n_txt, (pos[0]-n_txt.get_width()//2, pos[1]-n_txt.get_height()//2))
             
             if label:
-                l_txt = font.render(label, True, (0, 0, 0) if not is_masked else (150, 150, 150))
-                x_off = -105 if side == "left" else 25
-                surface.blit(l_txt, (pos[0] + x_off, pos[1] - 8))
+                # 🎨 文字顏色反白，被遮罩的字變暗灰
+                l_txt = font.render(label, True, (220, 230, 240) if not is_masked else (100, 100, 100))
+                x_off = (-105 * SCALE) if side == "left" else (25 * SCALE)
+                y_off = -8 * SCALE
+                hq_surface.blit(l_txt, (pos[0] + x_off, pos[1] + y_off))
 
-        # 執行渲染
-        for i, pos in enumerate(in_pos):
-            draw_neat_node(pos, input_labels[i], i, "left", state_vector[i])
-        for i, pos in enumerate(hid_pos):
-            draw_neat_node(pos, None, i + 100)
+        for i, pos in enumerate(in_pos): draw_neat_node(pos, input_labels[i], i, "left", state_vector[i])
+        for i, pos in enumerate(fc1_pos): draw_neat_node(pos, None, i + 100)
+        for i, pos in enumerate(lstm_pos): draw_neat_node(pos, None, i + 200)
         for i, pos in enumerate(act_pos):
-            # 💡 判斷是否被遮罩擋住
             is_masked = (i not in allowed_indices)
-            draw_neat_node(pos, action_labels[i], i, "right", 0, 
-                        is_best=(i == best_action_idx and not is_masked), 
-                        is_masked=is_masked)
-    def get_action_mask(target_obs):
+            draw_neat_node(pos, action_labels[i], i, "right", 0, is_best=(i == best_action_idx and not is_masked), is_masked=is_masked)
+
+        # 🎬 平滑縮小並貼回真實螢幕
+        final_image = pygame.transform.smoothscale(hq_surface, (sw, sh))
+        surface.blit(final_image, (0, 0))
+
+    def get_action_mask(target_obs, last_act_id=0): 
         """ 根據當前畫面狀態，回傳合法的 Action 索引列表 """
         player = target_obs.observation.player
         s_unit = target_obs.observation.feature_screen.unit_type
@@ -411,8 +445,7 @@ def main(argv):
         minerals = float(player.minerals)
         vespene = float(player.vespene)
         
-        # --- 套用防呆規則 ---
-        if (supply_surplus >= 16 or depots >= 3) and 1 in allowed_acts: allowed_acts.remove(1)
+        
 
         #if float(player.food_workers) >= 22 and 14 in allowed_acts: allowed_acts.remove(14)
         #你直接告訴 AI「工兵最多22個」，但 AI 永遠不會知道「為什麼是22個」、「多生一個工兵會不會更好」。
@@ -436,17 +469,15 @@ def main(argv):
         if not has_geyser and 11 in allowed_acts: allowed_acts.remove(11)
         if refineries == 0 and 42 in allowed_acts: allowed_acts.remove(42)
         
-        # 👉 修正 3：如果瓦斯已經大於 150，禁止再瘋狂派兵去採瓦斯 (截斷 Action 42 的無限迴圈)
-        #if vespene >= 150 and 42 in allowed_acts: allowed_acts.remove(42)
-        #這是最明顯的問題。掠奪者需要瓦斯，AI 應該自己學到「要保持瓦斯的庫存」，而不是你幫它設定一個上限。如果你封死這個動作，
-        #AI 根本沒機會學到「什麼時候該繼續採瓦斯、什麼時候夠了」。
+        
             
-        if player.idle_worker_count == 0 and 41 in allowed_acts: allowed_acts.remove(41)
+        if player.idle_worker_count == 0 and 41 in allowed_acts: 
+            allowed_acts.remove(41)
         
         if supply_surplus < 1:
             for act in [14, 16]: 
                 if act in allowed_acts: allowed_acts.remove(act)
-        if supply_surplus < 2 and 18 in allowed_acts: allowed_acts.remove(18)
+        
         
         if minerals < 50:
             for act in [14, 16, 34]: 
@@ -459,6 +490,14 @@ def main(argv):
         
         if vespene < 25 and 18 in allowed_acts: allowed_acts.remove(18)
         if vespene < 50 and 34 in allowed_acts: allowed_acts.remove(34)
+        
+        # ==========================================
+        # 🛡️ 新增：防刷屏機制 (禁止連續執行純行政指令)
+        # ==========================================
+        if last_act_id == 45 and 45 in allowed_acts: 
+            allowed_acts.remove(45) # 剛剛編過隊了，這回合不准再編
+        
+
         # 🛡️ 正確位置在 return 之前
         if not allowed_acts:
             allowed_acts = [44] 
@@ -505,46 +544,46 @@ def main(argv):
             
             # 拿出這段記憶「最一開始」的隱藏狀態，作為 LSTM 的回憶起點
             # sequence[0][5] 對應的是當時存入的 hidden_state (h_in, c_in)
-            h_in, c_in = sequence[0][5] 
+            h_in, c_in = sequence[0][6] 
             hidden = (h_in.to(device), c_in.to(device))
             
-            # 3. 順著時間線，一步一步推演這段記憶
             for step_data in sequence:
-                # 將資料解包並轉為 Tensor (加上 unsqueeze(0) 模擬 batch_size=1)
+                # 📦 完整解包 10 個參數
                 state = torch.FloatTensor([step_data[0]]).to(device)
                 action = torch.LongTensor([step_data[1]]).to(device)
-                reward = torch.FloatTensor([step_data[2]]).to(device)
-                next_state = torch.FloatTensor([step_data[3]]).to(device)
-                done = torch.FloatTensor([step_data[4]]).to(device)
-                gamma_mult = torch.FloatTensor([step_data[7]]).to(device)
-                next_allowed = step_data[8]  # 👈 拿出這一步的合法動作名單
-                # 第一大腦 (Brain) 回想這一步，並產生「新的隱藏狀態」給下一步用
-                q_actions, _, next_hidden = brain_model(state, hidden)
-                q_value = q_actions.gather(1, action.unsqueeze(1)).squeeze(1)
-                
-                with torch.no_grad():
-                    # 第一大腦預測下一步的最佳動作
-                    next_q_actions_brain, _, _ = brain_model(next_state, next_hidden)
-                    
-                    mask = torch.full_like(next_q_actions_brain, float('-inf'))
-                    mask[0, next_allowed] = 0
-                    masked_next_q_brain = next_q_actions_brain + mask
+                param_target = torch.LongTensor([step_data[2]]).to(device)
+                reward = torch.FloatTensor([step_data[3]]).to(device)
+                next_state = torch.FloatTensor([step_data[4]]).to(device)
+                done = step_data[5]
+                # step_data[6] 是 hidden_in，由外部維護
+                h_out, c_out = step_data[7]
+                hidden_out = (h_out.to(device), c_out.to(device))
+                gamma_mult = step_data[8]
+                next_allowed = step_data[9]
 
-                    # 👉 修正這行：從「套用過遮罩 (masked) 」的分數裡面挑選最大值！
-                    # 原本是 next_q_actions_brain.max...，現在改成 masked_next_q_brain.max...
-                    best_next_action = masked_next_q_brain.max(1)[1].unsqueeze(1)
+                # 🧠 第一大腦預測分數
+                q_actions, q_params, next_hidden = brain_model(state, hidden)
+                q_value = q_actions.gather(1, action.unsqueeze(1)).squeeze(1)
+
+                # 🔮 Double DQN 計算未來收益
+                with torch.no_grad():
+                    next_q_actions, _, _ = brain_model(next_state, hidden_out)
+                    next_mask = torch.full_like(next_q_actions, float('-inf'))
+                    next_mask[0, next_allowed] = 0
+                    best_next_action = (next_q_actions + next_mask).argmax(1).unsqueeze(1)
                     
-                    # 第二大腦 (Target) 針對該動作打客觀分數
-                    next_q_actions_target, _, _ = target_model(next_state, next_hidden)
-                    max_next_q = next_q_actions_target.gather(1, best_next_action).squeeze(1)
+                    target_q_actions, _, _ = target_model(next_state, hidden_out)
+                    max_next_q = target_q_actions.gather(1, best_next_action).squeeze(1)
                     
-                    # 計算最終期望值 (Bellman Equation)
                     target_q = reward + (gamma_mult * max_next_q * (1 - done))
-                # 累加這一步的誤差
-                loss = nn.SmoothL1Loss()(q_value, target_q) # ✨ 改成這個！
-                total_loss += loss
+
+                # ⚖️ 計算損失並更新
+                action_loss = nn.SmoothL1Loss()(q_value, target_q)
+                param_loss = torch.tensor(0.0).to(device)
+                if reward > 0:
+                    param_loss = nn.CrossEntropyLoss()(q_params, param_target)
                 
-                # ✨ 關鍵：將更新後的大腦記憶傳遞給時間線的「下一步」
+                total_loss += (action_loss + 0.5 * param_loss)
                 hidden = next_hidden
                 
         # 4. 根據這批連續記憶的總誤差，更新神經網路
@@ -664,37 +703,50 @@ def main(argv):
                 # ✨ 升級版：科技樹動態動作遮罩 (Tech-Tree Masking)
                 # ==========================================
                 
-                # ==========================================
-                # ✨ 升級版：科技樹動態動作遮罩 (Tech-Tree Masking)
-                # ==========================================
+                allowed_indices = get_action_mask(obs, last_action_id)
                 
-                # 👉 呼叫我們寫好的神級防呆函數，直接取得 0~10 的合法索引！
-                allowed_indices = get_action_mask(obs)
+                
 
                 
+                # 選擇動作 (降維版 + 拘束器發威)
                 # 選擇動作 (降維版 + 拘束器發威)
                 if random.random() <= epsilon:
                     # ✨ 從「合法」的選項中隨機挑選索引！(不再是全部盲選)
                     action_index = random.choice(allowed_indices)
-                    p_id = random.randint(1, 64)
+                    p_id = random.randint(1, 100)
+                    
+                    # 🌟 補上這行！把 index 轉換成真實的動作 ID
+                    a_id = VALID_ACTIONS[action_index] 
+                    
                     with torch.no_grad():
                         _, _, next_hidden_state = brain_model(state_t.unsqueeze(0), hidden_state)
                 else:
                     with torch.no_grad():
                         # q_actions 輸出 11 個分數
+                        
                         q_actions, q_params, next_hidden_state = brain_model(state_t.unsqueeze(0), hidden_state)
                         
-                        # ✨ 套用拘束器遮罩：把不合法動作的分數變成負無限大 (-inf)！
+                        # ✨ 套用拘束器遮罩
                         mask = torch.full_like(q_actions, float('-inf'))
                         mask[0, allowed_indices] = 0
                         masked_q_actions = q_actions + mask
                         
                         # 從合法的動作中，選出分數最高的那一個索引
+                        # 從合法的動作中，選出分數最高的那一個索引
                         action_index = masked_q_actions.argmax().item()
-                        p_id = q_params.argmax().item() + 1
+                        
+                        # ✨ 核心修正：加上安全鎖，確保大腦算出來的 p_id 落在 1~100 之間！
+                        raw_p_id = q_params.argmax().item()
+                        p_id = (raw_p_id % 100) + 1 
 
-                # ✨ 翻譯：把選出的 0~10 索引，轉回星海真實的 Action ID 給引擎執行
-                a_id = VALID_ACTIONS[action_index]
+                        # ==========================================
+                        # 🚑 核心急救機制：撞牆強制換位
+                        # ==========================================
+                        a_id = VALID_ACTIONS[action_index]
+                        
+                        if a_id == last_action_id and last_action_success == 0.0:
+                            # 強制換位也要改成 1~100
+                            p_id = random.randint(1, 100)
                 # ==========================================
                 # ==========================================
                 # ✨ 核心防彈機制：在一開始就先給定預設發呆動作！
@@ -713,7 +765,7 @@ def main(argv):
                 # 執行動作並進入下一幀
                 obs_list = env.step([sc2_action, actions.FUNCTIONS.no_op()])
                 next_obs = obs_list[0]
-                next_allowed_indices = get_action_mask(next_obs)
+                next_allowed_indices = get_action_mask(next_obs, a_id)
 
                 # ... 在你的訓練迴圈內 ...
 
@@ -728,8 +780,21 @@ def main(argv):
                     draw_dual_head_network(screen, brain_model, state, allowed_indices, hidden_state)
                     pygame.display.flip()
 
+                # ==========================================
+                # ✨ 核心修正：判斷動作是否「真的」被遊戲接受
+                # ==========================================
                 if sc2_action.function != 0:
                     current_action_success = 1.0
+                    
+                    # 讀取星海引擎的底層回報
+                    # action_result 陣列裡，1 代表成功，大於 1 代表各種報錯 (例如 32 是位置無效)
+                    action_results = next_obs.observation.action_result
+                    if len(action_results) > 0:
+                        for res in action_results:
+                            if res != 1:
+                                current_action_success = 0.0
+                                # print(f"🚫 引擎拒絕動作 (錯誤碼: {res})，觸發換位機制！")
+                                break
                 else:
                     current_action_success = 0.0
                 # --- 計算獎勵 (Reward) ---
@@ -759,8 +824,9 @@ def main(argv):
                     player.vespene,
                     player.food_workers,
                     0, 
-                    real_barracks_count, # ✨ 這裡傳入正確的數量
-                    a_id
+                    real_barracks_count, 
+                    a_id,
+                    p_id  # 🌟 補上這行！把 AI 決定的網格位置傳給紀錄器
                 )
 
                 # ==========================================
@@ -886,7 +952,8 @@ def main(argv):
                 )
 
                 # 將這一幀的 (狀態, 動作, 獎勵, 下一狀態, 結束旗標, LSTM記憶) 打包存入 N-Step 緩衝區
-                current_transition = (state, action_index, scaled_reward, next_state, done, hidden_state, next_hidden_state, next_allowed_indices)
+                # ✨ 核心修正：將 p_id 也打包進去 (記得減 1 轉回 0~63 索引)
+                current_transition = (state, action_index, p_id - 1, scaled_reward, next_state, done, hidden_state, next_hidden_state, next_allowed_indices)
                 n_step_buffer.append(current_transition)
 
                 # 更新觀測值與狀態，準備進入下一幀
@@ -905,44 +972,48 @@ def main(argv):
                 GAMMA = 0.99
 
                 # 2. 如果視窗滿了，結算過去 N 步的總報酬，並存入大腦
+                # 2. 如果視窗滿了，結算過去 N 步的總報酬，並存入大腦
                 if len(n_step_buffer) == N_STEP:
-                    n_reward = sum([n_step_buffer[i][2] * (GAMMA ** i) for i in range(N_STEP)])
+                    # 👉 修正 1：reward 被擠到了 index 3
+                    n_reward = sum([n_step_buffer[i][3] * (GAMMA ** i) for i in range(N_STEP)])
                     
                     n_state = n_step_buffer[0][0]
                     n_action = n_step_buffer[0][1]
-                    n_next_state = n_step_buffer[-1][3]
-                    n_done = n_step_buffer[-1][4]
-                    # 修正後：
-                    n_hidden_in = (n_step_buffer[0][5][0].cpu(), n_step_buffer[0][5][1].cpu())
-                    n_hidden_out = (n_step_buffer[-1][6][0].cpu(), n_step_buffer[-1][6][1].cpu())
-                    n_next_allowed = n_step_buffer[-1][7]
-
-                    # ✨ 打包成新的 N-Step 包裹
-                    n_transition = (n_state, n_action, n_reward, n_next_state, n_done, n_hidden_in, n_hidden_out, GAMMA ** N_STEP, n_next_allowed)
-                    #agent.store_transition(*n_transition)
-                    # 👉 加上這行！把這一刻的記憶確實寫入整局的歷史中
-                    episode_memory.append(n_transition)
+                    n_p_id = n_step_buffer[0][2]          # ✨ 新增：拿出當時的 p_id
+                    n_next_state = n_step_buffer[-1][4]   # 👉 修正：後面的 index 全部 +1
+                    n_done = n_step_buffer[-1][5]         
                     
-                    # 滑動視窗：移除最舊的一步，讓下一步進來
-                    n_step_buffer.popleft() 
+                    # 👉 修正：hidden_state 現在在 6 跟 7
+                    n_hidden_in = (n_step_buffer[0][6][0].cpu(), n_step_buffer[0][6][1].cpu())
+                    n_hidden_out = (n_step_buffer[-1][7][0].cpu(), n_step_buffer[-1][7][1].cpu())
+                    n_next_allowed = n_step_buffer[-1][8] # 👉 修正：到了 8
 
+                    # ✨ 修正 2：打包成新的包裹時，把 n_p_id 放進第三個位置 (index 2)
+                    n_transition = (n_state, n_action, n_p_id, n_reward, n_next_state, n_done, n_hidden_in, n_hidden_out, GAMMA ** N_STEP, n_next_allowed)
+                    
+                    episode_memory.append(n_transition)
+                    n_step_buffer.popleft()
+
+                # 3. 遊戲結束時，強制清空並結算緩衝區裡剩下的尾巴
                 # 3. 遊戲結束時，強制清空並結算緩衝區裡剩下的尾巴
                 if done:
                     while len(n_step_buffer) > 0:
                         actual_n = len(n_step_buffer)
-                        n_reward = sum([n_step_buffer[i][2] * (GAMMA ** i) for i in range(actual_n)])
+                        # 👉 同樣把 [2] 改成 [3]
+                        n_reward = sum([n_step_buffer[i][3] * (GAMMA ** i) for i in range(actual_n)])
+                        
                         n_state = n_step_buffer[0][0]
                         n_action = n_step_buffer[0][1]
-                        n_next_state = n_step_buffer[-1][3]
-                        n_done = n_step_buffer[-1][4]
-                        n_hidden_in = (n_step_buffer[0][5][0].cpu(), n_step_buffer[0][5][1].cpu())
-                        n_hidden_out = (n_step_buffer[-1][6][0].cpu(), n_step_buffer[-1][6][1].cpu())
+                        n_p_id = n_step_buffer[0][2]          # ✨ 新增
+                        n_next_state = n_step_buffer[-1][4]   # 👉 修正
+                        n_done = n_step_buffer[-1][5]
                         
-                        # 👉 新增這行：拿出最後一步的合法名單
-                        n_next_allowed = n_step_buffer[-1][7]
+                        n_hidden_in = (n_step_buffer[0][6][0].cpu(), n_step_buffer[0][6][1].cpu())
+                        n_hidden_out = (n_step_buffer[-1][7][0].cpu(), n_step_buffer[-1][7][1].cpu())
+                        n_next_allowed = n_step_buffer[-1][8]
                         
-                        # 👉 修改這行：把 n_next_allowed 打包進去 (變成 9 個參數，與上方統一)
-                        n_transition = (n_state, n_action, n_reward, n_next_state, n_done, n_hidden_in, n_hidden_out, GAMMA ** actual_n, n_next_allowed)
+                        # ✨ 同步把 n_p_id 放進來
+                        n_transition = (n_state, n_action, n_p_id, n_reward, n_next_state, n_done, n_hidden_in, n_hidden_out, GAMMA ** actual_n, n_next_allowed)
                         
                         episode_memory.append(n_transition)
                         n_step_buffer.popleft()
