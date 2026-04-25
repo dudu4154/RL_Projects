@@ -262,58 +262,52 @@ def main(argv):
         target_model.load_state_dict(brain_model.state_dict())
         print("✅ 載入成功！接續之前的記憶繼續訓練...")
 
-    epsilon = 0.01; epsilon_decay = 0.995; gamma = 0.998
+    epsilon = 1.00; epsilon_decay = 0.995; gamma = 0.998
 
     def draw_dual_head_network(surface, model, state_vector, allowed_indices, hidden_state=None):
         import numpy as np
         import torch
+        import pygame
 
-        # 1. 畫布基礎設定：乾淨的白底與中文字體
-        surface.fill((250, 250, 250)) 
-        # 列出常見的中文字體名稱清單，程式會按順序嘗試
-        font_candidates = [
-            'microsoftjhenghei',    # 微軟正黑體 (Windows)
-            'microsoftyahei',       # 微软雅黑 (Windows)
-            'simhei',               # 黑體 (Windows/Linux)
-            'msgothic',             # MS Gothic (通用)
-            'arialunicode',         # Arial Unicode
-            'stheitilight'          # 華文細黑 (macOS)
-        ]
+        # ==========================================
+        # ✨ 畫質革命：SSAA 超採樣反鋸齒設定
+        # ==========================================
+        SCALE = 2  
+        sw, sh = surface.get_size()
+        hq_surface = pygame.Surface((sw * SCALE, sh * SCALE))
+        
+        # 🎨 1. 賽博龐克背景色：極深的深藍/黑色
+        hq_surface.fill((10, 12, 18)) 
+        
+        # 嘗試載入支援中文的字體
+        font_candidates = ['microsoftjhenghei', 'microsoftyahei', 'simhei', 'msgothic', 'arialunicode']
         font = None
         for f_name in font_candidates:
             try:
-                # 嘗試載入字體
-                test_font = pygame.font.SysFont(f_name, 13, bold=True)
-                # 測試是否能渲染中文 (若失敗通常會回退到預設，這裡我們檢查名稱)
+                test_font = pygame.font.SysFont(f_name, 13 * SCALE, bold=True)
                 font = test_font
                 break
             except:
                 continue
-                
         if font is None:
-            font = pygame.font.SysFont("arial", 13) # 最後的備案
-        
-        num_font = pygame.font.SysFont("arial", 10)
+            font = pygame.font.SysFont("arial", 13 * SCALE)
+        num_font = pygame.font.SysFont("arial", 10 * SCALE, bold=True) # 數字加粗更醒目
 
-        # 🏷️ 變數名稱中文化 (維持 18 維輸入與 11 種動作) [cite: 253]
-        # 🏷️ 變數名稱標準化 (完全對應 get_state_vector 的 18 維輸入)
+        # 🏷️ 變數名稱標準化
         input_labels = [
             "工兵總數 (22)", "閒置工兵 (10)", "晶礦比例 (400)", "瓦斯比例 (200)", 
             "資源差距 (M-V)", "目前人口 (200)", "剩餘人口 (20)", "補給站數 (3)", 
             "瓦斯廠數 (2)", "軍營數量 (2)", "科技室數 (1)", "選中工兵 (0/1)", 
             "選中主堡 (0/1)", "選中兵營 (0/1)", "陸戰隊數 (50)", "掠奪者數 (5)", 
-            "上一動作成功", 
-            "上一動作ID(50)",   # 🌟 新增
-            "上一次區塊(64)",   # 🌟 新增
-            "時間進度 (13k)" 
+            "上一動作成功", "上一動作ID(50)", "上一次區塊(64)", "時間進度 (13k)" 
         ]
         
-        # 對應 VALID_ACTIONS = [1, 2, 11, 14, 16, 18, 34, 41, 42, 44, 45] 
         action_labels = [
             "蓋補給站", "蓋兵營", "蓋瓦斯廠", "製造工兵", "造陸戰隊", 
             "造掠奪者", "兵營升級", "閒置採礦", "指派瓦斯", "發呆休息", "主堡編隊"
         ]
-            # 2. 獲取當前決策狀態
+
+        # 2. 獲取當前決策狀態
         device = next(model.parameters()).device
         model.eval()
         with torch.no_grad():
@@ -323,104 +317,117 @@ def main(argv):
             
             q_actions, _, _ = model(state_t, hidden_state)
             q_vals = q_actions.cpu().numpy()[0]
-            # 找出當前 AI 最想做的動作 (需在合法名單中)
             best_action_idx = int(np.argmax(q_vals))
 
-        # 3. 座標佈局
         # ==========================================
-        # ✨ 視覺深層化修正：拆解為四層流動
+        # 3. 座標佈局 (維持寬螢幕比例不變)
         # ==========================================
-        
-        # 1. 輸入層 (X: 100)
-        in_pos = [(100, y * 30 + 50) for y in range(20)] 
-        
-        # 2. FC1 特徵層 (X: 400) - 抽樣 12 個代表
-        fc1_pos = [(400, y * 40 + 100) for y in range(12)] 
-        
-        # 3. LSTM 記憶層 (X: 750) - 抽樣 12 個代表
-        lstm_pos = [(750, y * 40 + 100) for y in range(12)] 
-        
-        # 4. 決策輸出層 (X: 1100)
-        act_pos = [(1100, y * 45 + 100) for y in range(11)]
+        in_pos = [(150 * SCALE, (y * 30 + 50) * SCALE) for y in range(20)]    
+        fc1_pos = [(400 * SCALE, (y * 40 + 100) * SCALE) for y in range(12)]  
+        lstm_pos = [(750 * SCALE, (y * 40 + 100) * SCALE) for y in range(12)] 
+        act_pos = [(1050 * SCALE, (y * 45 + 100) * SCALE) for y in range(11)] 
 
-        # 4. 提取權重矩陣
         fc1_w = model.fc1.weight.data.cpu().numpy()
+        lstm_w = model.lstm.weight_ih_l0.data.cpu().numpy()[:128, :]
         act_w = model.fc_action.weight.data.cpu().numpy()
 
-        # 🌟 5. 繪製連線 (Top-K 強制稀疏化實線)
-        # A. 輸入 -> 隱藏層
-        for h_idx in range(16):
-            actual_h = h_idx * 8
+        # ==========================================
+        # 5. 繪製連線 (🎨 霓虹螢光配色)
+        # ==========================================
+        
+        # A. 輸入層 -> FC1 特徵層 
+        for h_idx in range(12): 
+            actual_h = h_idx * 10
             weights = fc1_w[actual_h, :]
             top_2_inputs = np.argsort(np.abs(weights))[-2:]
-            for i in range(20): # 🌟 這裡從 18 改成 20
+            
+            for i in range(20):
                 w = weights[i]
                 if i in top_2_inputs and abs(w) > 0.1:
-                    color = (0, 0, 220) if w > 0 else (220, 0, 0)
+                    # 正權重：霓虹青 (Cyan) / 負權重：賽博粉 (Magenta)
+                    color = (0, 200, 255) if w > 0 else (255, 50, 150)
                     active_multiplier = 2.0 if state_vector[i] > 0.1 else 0.5
-                    width = max(1, int(abs(w) * 4 * active_multiplier))
-                    pygame.draw.line(surface, color, in_pos[i], hid_pos[h_idx], width)
+                    width = max(1, int(abs(w) * 4 * active_multiplier)) * SCALE
+                    pygame.draw.line(hq_surface, color, in_pos[i], fc1_pos[h_idx], width)
 
-        # B. 隱藏層 -> 動作層
+        # B. FC1 特徵層 -> LSTM 記憶層 
+        for j in range(12): 
+            actual_j = j * 10
+            for i in range(12): 
+                actual_i = i * 10
+                w = lstm_w[actual_j, actual_i]
+                abs_w = abs(w)
+                
+                if abs_w > 0.05: 
+                    if w > 0:
+                        # 高權重：亮青色 / 低權重：暗藍綠色
+                        color = (0, 200, 255) if abs_w > 0.15 else (0, 80, 120)
+                    else:
+                        # 高權重：亮粉紅 / 低權重：暗紫紅色
+                        color = (255, 50, 150) if abs_w > 0.15 else (120, 20, 70)
+                    
+                    width = max(1, int(abs_w * 15)) * SCALE
+                    pygame.draw.line(hq_surface, color, fc1_pos[i], lstm_pos[j], width)
+
+        # C. LSTM 記憶層 -> 動作層 
         for a_idx in range(11):
-            weights = act_w[a_idx, :]
-            sampled_weights = [weights[h * 8] for h in range(16)]
-            top_2_hidden = np.argsort(np.abs(sampled_weights))[-2:]
-            
-            # 💡 如果該動作不在合法名單中，不畫連線，代表訊號被中斷
             if a_idx not in allowed_indices: continue
+            
+            weights = act_w[a_idx, :]
+            sampled_weights = [weights[h * 10] for h in range(12)]
+            top_2_hidden = np.argsort(np.abs(sampled_weights))[-2:]
 
-            for h_idx in range(16):
-                actual_h = h_idx * 8
+            for h_idx in range(12):
+                actual_h = h_idx * 10
                 w = act_w[a_idx, actual_h]
                 if h_idx in top_2_hidden and abs(w) > 0.1:
-                    color = (0, 0, 220) if w > 0 else (220, 0, 0)
+                    color = (0, 200, 255) if w > 0 else (255, 50, 150)
                     is_active_path = (a_idx == best_action_idx)
-                    width = max(1, int(abs(w) * (6 if is_active_path else 2)))
-                    pygame.draw.line(surface, color, hid_pos[h_idx], act_pos[a_idx], width)
+                    width = max(1, int(abs(w) * (6 if is_active_path else 2))) * SCALE
+                    pygame.draw.line(hq_surface, color, lstm_pos[h_idx], act_pos[a_idx], width)
 
-        # 🎨 6. 節點渲染
+        # ==========================================
+        # 🎨 6. 節點渲染 (全息科技風格)
+        # ==========================================
         def draw_neat_node(pos, label, num, side="left", active_val=0, is_best=False, is_masked=False):
-            # 決定顏色
             if is_masked:
-                fill_color = (80, 80, 80)    # 🌑 被遮罩擋住：深灰色
-                border_color = (40, 40, 40)
-                text_color = (150, 150, 150)
+                # 被遮罩：極暗灰
+                fill_color, border_color, text_color = (20, 20, 20), (50, 50, 50), (100, 100, 100)
             elif is_best:
-                fill_color = (180, 180, 255) # 🔵 最終決策：淺藍色
-                border_color = (0, 0, 0)
-                text_color = (0, 0, 0)
+                # 最終決策：亮青色發光
+                fill_color, border_color, text_color = (0, 80, 150), (0, 255, 255), (255, 255, 255)
             elif active_val > 0.1:
-                fill_color = (200, 255, 200) # 🟢 活躍輸入：淺綠色
-                border_color = (0, 0, 0)
-                text_color = (0, 0, 0)
+                # 活躍輸入：亮綠色發光
+                fill_color, border_color, text_color = (0, 100, 50), (0, 255, 100), (255, 255, 255)
             else:
-                fill_color = (255, 255, 255) # ⚪ 一般狀態：白色
-                border_color = (50, 50, 50)
-                text_color = (0, 0, 0)
+                # 一般未啟動狀態：深底色搭配暗藍邊框
+                fill_color, border_color, text_color = (15, 20, 25), (40, 80, 120), (200, 200, 200)
 
-            pygame.draw.circle(surface, fill_color, pos, 13)
-            pygame.draw.circle(surface, border_color, pos, 13, 2)
+            radius = 13 * SCALE
+            pygame.draw.circle(hq_surface, fill_color, pos, radius)
+            pygame.draw.circle(hq_surface, border_color, pos, radius, 2 * SCALE)
             
             n_txt = num_font.render(str(num), True, text_color)
-            surface.blit(n_txt, (pos[0]-n_txt.get_width()//2, pos[1]-n_txt.get_height()//2))
+            hq_surface.blit(n_txt, (pos[0]-n_txt.get_width()//2, pos[1]-n_txt.get_height()//2))
             
             if label:
-                l_txt = font.render(label, True, (0, 0, 0) if not is_masked else (150, 150, 150))
-                x_off = -105 if side == "left" else 25
-                surface.blit(l_txt, (pos[0] + x_off, pos[1] - 8))
+                # 🎨 文字顏色反白，被遮罩的字變暗灰
+                l_txt = font.render(label, True, (220, 230, 240) if not is_masked else (100, 100, 100))
+                x_off = (-105 * SCALE) if side == "left" else (25 * SCALE)
+                y_off = -8 * SCALE
+                hq_surface.blit(l_txt, (pos[0] + x_off, pos[1] + y_off))
 
-        # 執行渲染
-        for i, pos in enumerate(in_pos):
-            draw_neat_node(pos, input_labels[i], i, "left", state_vector[i])
-        for i, pos in enumerate(hid_pos):
-            draw_neat_node(pos, None, i + 100)
+        for i, pos in enumerate(in_pos): draw_neat_node(pos, input_labels[i], i, "left", state_vector[i])
+        for i, pos in enumerate(fc1_pos): draw_neat_node(pos, None, i + 100)
+        for i, pos in enumerate(lstm_pos): draw_neat_node(pos, None, i + 200)
         for i, pos in enumerate(act_pos):
-            # 💡 判斷是否被遮罩擋住
             is_masked = (i not in allowed_indices)
-            draw_neat_node(pos, action_labels[i], i, "right", 0, 
-                        is_best=(i == best_action_idx and not is_masked), 
-                        is_masked=is_masked)
+            draw_neat_node(pos, action_labels[i], i, "right", 0, is_best=(i == best_action_idx and not is_masked), is_masked=is_masked)
+
+        # 🎬 平滑縮小並貼回真實螢幕
+        final_image = pygame.transform.smoothscale(hq_surface, (sw, sh))
+        surface.blit(final_image, (0, 0))
+
     def get_action_mask(target_obs, last_act_id=0): 
         """ 根據當前畫面狀態，回傳合法的 Action 索引列表 """
         player = target_obs.observation.player
