@@ -98,7 +98,7 @@ class TrainingLogger:
         
         with open(self.filename, mode='a', newline='', encoding='utf-8-sig') as file:
             writer = csv.writer(file)
-            writer.writerow([ep, task_name, f"{eps:.3f}", int(reward), end_loop, marauders_cnt, marines_cnt])
+            writer.writerow([ep, task_name, f"{eps:.3f}", f"{float(reward):.4f}", end_loop, marauders_cnt, marines_cnt])
 class Logger:
     def __init__(self, filename):
         self.filename = filename
@@ -262,7 +262,7 @@ def main(argv):
         target_model.load_state_dict(brain_model.state_dict())
         print("✅ 載入成功！接續之前的記憶繼續訓練...")
 
-    epsilon = 1.00; epsilon_decay = 0.995; gamma = 0.998
+    epsilon = 1.00; epsilon_decay = 0.998; gamma = 0.998
 
     def draw_dual_head_network(surface, model, state_vector, allowed_indices, hidden_state=None):
         import numpy as np
@@ -440,7 +440,7 @@ def main(argv):
         depots = int(np.round(np.sum((s_unit == 19) & (s_player == 1)) / 69.0))
         
         # 👉 修正 1：移除 44 (發呆)，不准 AI 躺平
-        allowed_acts = [1, 2, 11, 14, 16, 18, 34, 41, 42, 45]
+        allowed_acts = [1, 2, 11, 14, 16, 18, 34, 41, 42,44, 45]
         supply_surplus = float(player.food_cap) - float(player.food_used)
         minerals = float(player.minerals)
         vespene = float(player.vespene)
@@ -460,7 +460,7 @@ def main(argv):
         if barracks == 0:
             if 11 in allowed_acts: allowed_acts.remove(11)
             # 👉 移除 44 的連帶修改
-            for act in [16, 18, 34]: 
+            for act in [16, 18, 34,44]: 
                 if act in allowed_acts: allowed_acts.remove(act)
                 
         if techlabs == 0 and 18 in allowed_acts: allowed_acts.remove(18)
@@ -497,12 +497,19 @@ def main(argv):
         if last_act_id == 45 and 45 in allowed_acts: 
             allowed_acts.remove(45) # 剛剛編過隊了，這回合不准再編
         
+        # 👇 =============== 請在此處補上這段 =============== 👇
+        # 將過濾完的 Action ID 轉換成 0~10 的 Array Index，交給神經網路使用
+        valid_actions_ref = [1, 2, 11, 14, 16, 18, 34, 41, 42, 44, 45]
+        allowed_indices = [valid_actions_ref.index(act) for act in allowed_acts]
+        
+        # 確保即使所有動作都被遮罩，至少留一個 44 (發呆) 避免 crash
+        if not allowed_indices:
+            allowed_indices = [valid_actions_ref.index(44)]
+            
+        return allowed_indices
+        
 
-        # 🛡️ 正確位置在 return 之前
-        if not allowed_acts:
-            allowed_acts = [44] 
-        return [VALID_ACTIONS.index(act) for act in allowed_acts]
-        # 🛡️ 保底機制：如果所有動作都被過濾掉了，強制保留「發呆」
+        
         
 
     def train_model():
@@ -602,10 +609,7 @@ def main(argv):
         
     ) as env:
         
-        current_session_file = os.path.join(log_dir, f"dqn_training_log_{int(time.time())}.csv")
-        with open(current_session_file, "w", encoding="utf-8") as f:
-            f.write("Episode,Task,Epsilon,Total_Reward,End_Loop,Marauders,Marines\n")
-
+        
 
         best_record = [13440.0] 
 
@@ -923,6 +927,9 @@ def main(argv):
 
                     print(f"終局: Y={y:.2f}, X1={x1:.2f}, X2={x2:.2f}, X3={x3:.2f}, raw={raw_score:.4f}")
                 
+                if last_action_success == 0.0 and step_reward == 0.0:
+                    # 只要引擎或底層腳本拒絕了動作 (no_op)，就微微扣一點分
+                    step_reward -= 0.001
 
                 # ==========================================
                 # 第五步：tanh 壓縮（核心）
@@ -1098,11 +1105,9 @@ def main(argv):
                     
 
                     print(f"!!! 即將寫入 CSV 的分數是: {final_reward} (型別: {type(final_reward)})")
-                    #logger.log_episode(ep + 1, "掠奪者任務", epsilon, float(episode_reward), current_loop, current_real_count, marine_count)
+                    logger.log_episode(ep + 1, "掠奪者任務", epsilon, float(final_reward), current_loop, current_real_count, marine_count)
                     #log_file = f"d:/RL_Projects/dudu DRQN/log/dqn_training_log_{int(time.time())}.csv"
-                    with open(current_session_file, "a", encoding="utf-8") as f:
-                        line = f"{ep+1},掠奪者任務,{epsilon:.3f},{final_reward:.4f},{current_loop},{current_real_count},{marine_count}\n"
-                        f.write(line)
+                    
                     print(f"✅ 已手動強制寫入 CSV: {final_reward:.4f}")
                     break # ✨ 記得加上 break 跳出 while 迴圈
 
