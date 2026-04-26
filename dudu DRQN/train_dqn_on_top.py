@@ -1029,7 +1029,7 @@ def main(argv):
                         if len(success_memory) > MAX_ELITE_MEMORY:
                             success_memory.pop()
                             
-                        print(f"🏆 菁英榜更新！目前收錄 {len(success_memory)} 局，歷史最高分: {success_memory[0][0]:.1f}")
+                        print(f"🏆 菁英榜更新！目前收錄 {len(success_memory)} 局，歷史最短時間: {success_memory[0][0]:.0f} 幀")
                         
                         # ✨ 修改：不要每局存，排行榜數量是 5 的倍數時才寫入硬碟
                         if len(success_memory) % 5 == 0:
