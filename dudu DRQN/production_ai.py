@@ -527,10 +527,9 @@ class ProductionAI:
                                    any(u.unit_type == BARRACKS_ID for u in obs.observation.multi_select)
             
             if is_barracks_selected:
-                # 已經選中了兵營，但按鈕還沒出來
-                # (可能是因為資源不足，或是點到了沒有科技實驗室的兵營)
-                self.locked_action = 18 # 繼續維持鎖定
-                return actions.FUNCTIONS.no_op() # 原地等待按鈕加載或超時放棄
+                # 👇 關鍵修正：已經選到兵營了，但按鈕沒出來？代表兵營在忙！立刻放棄並解鎖！
+                self.locked_action = None 
+                return actions.FUNCTIONS.no_op()
                 
             # 3. 還沒選中兵營：去畫面上隨機點擊一個兵營，並「啟動鎖定」
             self.locked_action = 18
