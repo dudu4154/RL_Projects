@@ -98,7 +98,7 @@ class TrainingLogger:
         
         with open(self.filename, mode='a', newline='', encoding='utf-8-sig') as file:
             writer = csv.writer(file)
-            writer.writerow([ep, task_name, f"{eps:.3f}", f"{float(reward):.4f}", end_loop, marauders_cnt, marines_cnt])
+            writer.writerow([ep, task_name, f"{eps:.3f}", int(reward), end_loop, marauders_cnt, marines_cnt])
 class Logger:
     def __init__(self, filename):
         self.filename = filename
@@ -262,7 +262,7 @@ def main(argv):
         target_model.load_state_dict(brain_model.state_dict())
         print("✅ 載入成功！接續之前的記憶繼續訓練...")
 
-    epsilon = 1.00; epsilon_decay = 0.998; gamma = 0.998
+    epsilon = 1.00; epsilon_decay = 0.995; gamma = 0.998
 
     def draw_dual_head_network(surface, model, state_vector, allowed_indices, hidden_state=None):
         import numpy as np
@@ -440,7 +440,7 @@ def main(argv):
         depots = int(np.round(np.sum((s_unit == 19) & (s_player == 1)) / 69.0))
         
         # 👉 修正 1：移除 44 (發呆)，不准 AI 躺平
-        allowed_acts = [1, 2, 11, 14, 16, 18, 34, 41, 42,44, 45]
+        allowed_acts = [1, 2, 11, 14, 16, 18, 34, 41, 42, 45]
         supply_surplus = float(player.food_cap) - float(player.food_used)
         minerals = float(player.minerals)
         vespene = float(player.vespene)
@@ -460,7 +460,7 @@ def main(argv):
         if barracks == 0:
             if 11 in allowed_acts: allowed_acts.remove(11)
             # 👉 移除 44 的連帶修改
-            for act in [16, 18, 34,44]: 
+            for act in [16, 18, 34]: 
                 if act in allowed_acts: allowed_acts.remove(act)
                 
         if techlabs == 0 and 18 in allowed_acts: allowed_acts.remove(18)
@@ -477,7 +477,7 @@ def main(argv):
         if supply_surplus < 1:
             for act in [14, 16]: 
                 if act in allowed_acts: allowed_acts.remove(act)
-        
+        if supply_surplus < 2 and 18 in allowed_acts: allowed_acts.remove(18)  # ← 加這行
         
         if minerals < 50:
             for act in [14, 16, 34]: 
@@ -497,19 +497,12 @@ def main(argv):
         if last_act_id == 45 and 45 in allowed_acts: 
             allowed_acts.remove(45) # 剛剛編過隊了，這回合不准再編
         
-        # 👇 =============== 請在此處補上這段 =============== 👇
-        # 將過濾完的 Action ID 轉換成 0~10 的 Array Index，交給神經網路使用
-        valid_actions_ref = [1, 2, 11, 14, 16, 18, 34, 41, 42, 44, 45]
-        allowed_indices = [valid_actions_ref.index(act) for act in allowed_acts]
-        
-        # 確保即使所有動作都被遮罩，至少留一個 44 (發呆) 避免 crash
-        if not allowed_indices:
-            allowed_indices = [valid_actions_ref.index(44)]
-            
-        return allowed_indices
-        
 
-        
+        # 🛡️ 正確位置在 return 之前
+        if not allowed_acts:
+            allowed_acts = [44] 
+        return [VALID_ACTIONS.index(act) for act in allowed_acts]
+        # 🛡️ 保底機制：如果所有動作都被過濾掉了，強制保留「發呆」
         
 
     def train_model():
@@ -609,7 +602,10 @@ def main(argv):
         
     ) as env:
         
-        
+        current_session_file = os.path.join(log_dir, f"dqn_training_log_{int(time.time())}.csv")
+        with open(current_session_file, "w", encoding="utf-8") as f:
+            f.write("Episode,Task,Epsilon,Total_Reward,End_Loop,Marauders,Marines\n")
+
 
         best_record = [13440.0] 
 
@@ -659,6 +655,7 @@ def main(argv):
 
             episode_reward = 0.0  
             final_reward = 0.0
+            failed_actions = 0
             achieved_milestones = set()
             
 
@@ -760,11 +757,8 @@ def main(argv):
                 try:
                     sc2_action = agent.get_action(obs, a_id, parameter=p_id)
                 except Exception as e:
-                    print(f"⚠️ 錯誤: {e}")
-                    sc2_action = actions.FUNCTIONS.no_op()
-                except Exception as e:
-                    # 如果腳本內部發生任何不可預期的錯誤，印出警告但不崩潰
                     print(f"⚠️ 執行動作 {a_id} 時發生錯誤: {e}，自動轉為發呆 (no_op)")
+                    sc2_action = actions.FUNCTIONS.no_op()
 
                 # 執行動作並進入下一幀
                 obs_list = env.step([sc2_action, actions.FUNCTIONS.no_op()])
@@ -813,7 +807,7 @@ def main(argv):
                 # 計算掠奪者數量 (ID: 51，每隻約佔 10 像素)
                 u_pixels = np.sum((next_s_unit == 51) & (next_s_player == 1))
                 current_real_count = int(np.round(float(u_pixels) / 10.0))
-                
+                current_real_count = min(current_real_count, 5)
 
                 
                 actual_id = agent.locked_action if agent.locked_action is not None else a_id
@@ -846,6 +840,12 @@ def main(argv):
             # ==========================================
 
                 step_reward = 0.0  # 每一幀開始時，先將本幀獎勵歸零
+                
+
+
+                # 追蹤失敗動作次數（不扣分，只計數）
+                if last_action_success == 0.0 and not done:
+                    failed_actions += 1
 
                 # ==========================================
                 # 第一步：科技樹里程碑（追蹤用，不給分）
@@ -903,13 +903,14 @@ def main(argv):
                     # X 軸三個維度
                     x1 = y                                         # X1. 掠奪者產量（直接等於Y軸）
                     x2 = len(achieved_milestones) / 4.0            # X2. 建築完成度（蓋了幾個里程碑）
-                    x3 = 1.0 - (float(current_loop) / 13440.0)     # X3. 時間效率（越快越高）
+                    x3 = 1.0 - (float(current_loop) / 13440.0)      # X3. 時間效率（越快越高)
+                    x4 = max(0.0, 1.0 - (failed_actions / 840.0))   # X4. 動作成功率
 
 
                     # 成功和失敗用不同公式
                     if current_real_count >= 5:
                         # 成功：產量 + 建築 + 時間效率都算
-                        raw_score = 0.7 * x1 + 0.1 * x2 + 0.2 * x3
+                        raw_score = 0.6 * x1 + 0.1 * x2 + 0.2 * x3 + 0.1 * x4
                     else:
                         # 失敗：只看造了幾隻，直接給負數
                         # 0隻=-0.7, 1隻=-0.5, 2隻=-0.3, 3隻=-0.1, 4隻=+0.1
@@ -925,11 +926,8 @@ def main(argv):
                             f.write(str(best_record[0]))
                         print(f"🔥 新紀錄！最短完成時間: {best_record[0]} 幀")
 
-                    print(f"終局: Y={y:.2f}, X1={x1:.2f}, X2={x2:.2f}, X3={x3:.2f}, raw={raw_score:.4f}")
-                
-                if last_action_success == 0.0 and step_reward == 0.0:
-                    # 只要引擎或底層腳本拒絕了動作 (no_op)，就微微扣一點分
-                    step_reward -= 0.001
+                    print(f"終局: Y={y:.2f}, X1={x1:.2f}, X2={x2:.2f}, X3={x3:.2f},X4={x4:.2f}, raw={raw_score:.4f}")
+                    print(f"📊 失敗動作統計: {failed_actions} 次，總動作數約840，失敗比例: {failed_actions/840.0:.2f}，動作成功率x4: {max(0.0, 1.0 - (failed_actions/840.0)):.2f}")
 
                 # ==========================================
                 # 第五步：tanh 壓縮（核心）
@@ -964,11 +962,11 @@ def main(argv):
                 n_step_buffer.append(current_transition)
 
                 # 更新觀測值與狀態，準備進入下一幀
-                obs = next_obs
+                '''obs = next_obs
                 state = next_state
                 hidden_state = (next_hidden_state[0].detach(), next_hidden_state[1].detach())
                 last_action_id = a_id
-                last_action_success = current_action_success
+                last_action_success = current_action_success'''
 
 
 
@@ -1105,9 +1103,11 @@ def main(argv):
                     
 
                     print(f"!!! 即將寫入 CSV 的分數是: {final_reward} (型別: {type(final_reward)})")
-                    logger.log_episode(ep + 1, "掠奪者任務", epsilon, float(final_reward), current_loop, current_real_count, marine_count)
+                    #logger.log_episode(ep + 1, "掠奪者任務", epsilon, float(episode_reward), current_loop, current_real_count, marine_count)
                     #log_file = f"d:/RL_Projects/dudu DRQN/log/dqn_training_log_{int(time.time())}.csv"
-                    
+                    with open(current_session_file, "a", encoding="utf-8") as f:
+                        line = f"{ep+1},掠奪者任務,{epsilon:.3f},{final_reward:.4f},{current_loop},{current_real_count},{marine_count}\n"
+                        f.write(line)
                     print(f"✅ 已手動強制寫入 CSV: {final_reward:.4f}")
                     break # ✨ 記得加上 break 跳出 while 迴圈
 
