@@ -839,48 +839,78 @@ def main(argv):
                 # ==========================================
                 # 🏆 恢復密集獎勵系統 (Dense Reward)
                 # ==========================================
+                # ==========================================
+                # 🏆 精確評估系統 (0.6 時間, 0.2 建築, 0.1 產量, 0.1 效率)
+                # ==========================================
                 step_reward = 0.0
                 
-                # 1. 里程碑獎勵 (立即給予小糖果，指引方向)
+                # 1. 里程碑追蹤 (不直接給分，用於終局結算)
                 if "depot" not in achieved_milestones and current_depots >= 1:
                     achieved_milestones.add("depot")
-                    step_reward += 0.2  # ✨ 立刻給分！
-                    print("👍 補給站里程碑達成 (+0.2)")
-
                 if "barracks" not in achieved_milestones and current_barracks >= 1:
                     achieved_milestones.add("barracks")
-                    step_reward += 0.4  # ✨ 兵營比較難，給多一點
-                    print("👍 兵營里程碑達成 (+0.4)")
-
                 if "refinery" not in achieved_milestones and current_refineries >= 1:
                     achieved_milestones.add("refinery")
-                    step_reward += 0.3  # ✨ 瓦斯廠達成
-                    print("👍 瓦斯廠里程碑達成 (+0.3)")
-
                 if "techlab" not in achieved_milestones and current_techlabs >= 1:
                     achieved_milestones.add("techlab")
-                    step_reward += 0.6  # ✨ 科技室是最終前置，給大獎
-                    print("👍 科技室里程碑達成 (+0.6)")
 
-                # 2. 掠奪者產出獎勵
+                # 2. 掠奪者產量追蹤 (不直接給分，用於終局結算)
                 if current_real_count > getattr(agent, 'last_target_count', 0):
                     agent.last_target_count = current_real_count
-                    step_reward += 1.0  # ✨ 每產出一隻給 1.0 的強烈正回饋
-                    print(f"🎯 掠奪者產出！目前進度: {current_real_count}/5 (+1.0)")
+                    print(f"🎯 掠奪者產出！目前進度: {current_real_count}/5")
 
-                # 3. 終局結算 (保留作為該局的評分指標，但不完全取代過程獎勵)
+                # 3. 無效動作懲罰 (Process Penalty)
+                # 為了讓訓練穩定，過程中的錯誤還是給予微小的懲罰，促使它尋找合法座標
+                if current_action_success == 0.0:
+                    step_reward -= 0.01
+                    # 追蹤整局的失敗次數，用於終局結算
+                    failed_actions += 1
+
+                # 4. 終局判定與四大維度結算
                 current_loop = int(next_obs.observation.game_loop[0])
-                done = next_obs.last() or current_loop >= 13440 or current_real_count >= 5
+                MAX_LOOP = 13440.0
+                done = next_obs.last() or current_loop >= MAX_LOOP or current_real_count >= 5
 
                 if done:
-                    # 只有在失敗且什麼都沒做的時候才給予巨大懲罰
-                    if current_real_count == 0 and len(achieved_milestones) < 2:
-                         step_reward -= 1.0
-                    elif current_real_count >= 5:
-                         step_reward += 2.0 # 提早完成的終極大獎
-                         
-                # 透過 tanh 壓縮，讓單步獎勵平滑化
-                scaled_reward = math.tanh(step_reward)
+                    # 維度 1：時間分數 (權重 0.6) - 越快完成分數越高
+                    # 如果沒造出 5 隻，時間分數為 0
+                    time_score = 0.0
+                    if current_real_count >= 5:
+                        time_score = 1.0 - (current_loop / MAX_LOOP)
+                        time_score = max(0.0, time_score) # 確保不為負
+                    
+                    # 維度 2：里程碑分數 (權重 0.2) - 蓋了幾種關鍵建築
+                    milestone_score = len(achieved_milestones) / 4.0
+                    
+                    # 維度 3：掠奪者數量分數 (權重 0.1)
+                    marauder_score = min(current_real_count / 5.0, 1.0)
+                    
+                    # 維度 4：操作效率分數 (權重 0.1) - 容忍一定比例的錯誤，過多則扣分
+                    # 假設整局平均操作 500 次，失敗 50 次以內算滿分 1.0
+                    efficiency_score = max(0.0, 1.0 - (failed_actions / 100.0))
+                    
+                    # 💥 最終總分計算 (0.6, 0.2, 0.1, 0.1)
+                    raw_final_score = (
+                        (0.6 * time_score) + 
+                        (0.2 * milestone_score) + 
+                        (0.1 * marauder_score) + 
+                        (0.1 * efficiency_score)
+                    )
+                    
+                    # 將 0.0 ~ 1.0 的分數，映射到 -1.0 ~ 1.0 的區間
+                    # 如果連一隻都沒生出來，分數一定會是負的
+                    if current_real_count >= 5:
+                        # 成功時，分數保底 0.5 以上，速度越快越高分
+                        step_reward += 0.5 + (raw_final_score * 0.5) 
+                    else:
+                        # 失敗時，根據蓋房子的進度給予 -1.0 到 0.0 之間的懲罰
+                        step_reward += (raw_final_score * 2.0) - 1.0
+                        
+                    print(f"🏁 終局結算: 時間={time_score:.2f}, 建築={milestone_score:.2f}, 產量={marauder_score:.2f}, 效率={efficiency_score:.2f} => 總分={step_reward:.4f}")
+
+                # 我們不再每一幀都用 tanh 壓縮，而是保持 step_reward 的原值
+                # 只有在終局時，step_reward 才會有較大的數值
+                scaled_reward = np.clip(step_reward, -1.0, 1.0) 
                 episode_reward += scaled_reward
                 #episode_reward += scaled_reward  # 累計這局的總分（用於 CSV 記錄與排行榜）
                 if done:
