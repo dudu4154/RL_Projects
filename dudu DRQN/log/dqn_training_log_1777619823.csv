@@ -1,0 +1,4 @@
+Episode,Task,Epsilon,Total_Reward,End_Loop,Marauders,Marines
+1,掠奪者任務,0.300,0.0000,13440,0,0
+2,掠奪者任務,0.298,0.0000,13440,0,0
+3,掠奪者任務,0.297,0.9951,10528,5,0

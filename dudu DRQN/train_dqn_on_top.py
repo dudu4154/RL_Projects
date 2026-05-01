@@ -262,7 +262,7 @@ def main(argv):
         target_model.load_state_dict(brain_model.state_dict())
         print("✅ 載入成功！接續之前的記憶繼續訓練...")
 
-    epsilon = 1.00; epsilon_decay = 0.995; gamma = 0.998
+    epsilon = 0.30; epsilon_decay = 0.995; gamma = 0.998
 
     def draw_dual_head_network(surface, model, state_vector, allowed_indices, hidden_state=None):
         import numpy as np
@@ -455,13 +455,10 @@ def main(argv):
         #if barracks >= 2 and 2 in allowed_acts: allowed_acts.remove(2)
         #同樣道理，你幫 AI 決定了「兵營最多2個」。但也許 AI 會學到「3個兵營可以同時生產掠奪者，速度更快」，
         #你把這個可能性直接封死了。
+        allowed_acts.remove(16)
         if depots == 0 and 2 in allowed_acts: allowed_acts.remove(2)
             
-        if barracks == 0:
-            if 11 in allowed_acts: allowed_acts.remove(11)
-            # 👉 移除 44 的連帶修改
-            for act in [16, 18, 34]: 
-                if act in allowed_acts: allowed_acts.remove(act)
+        
                 
         if techlabs == 0 and 18 in allowed_acts: allowed_acts.remove(18)
         if refineries >= 1 and 11 in allowed_acts: allowed_acts.remove(11)
@@ -598,7 +595,7 @@ def main(argv):
         players=[sc2_env.Agent(sc2_env.Race.terran),sc2_env.Bot(sc2_env.Race.terran, sc2_env.Difficulty.very_easy)], #sc2_env.Agent(sc2_env.Race.terran)
         agent_interface_format=sc2_env.AgentInterfaceFormat(
             feature_dimensions=sc2_env.Dimensions(screen=84, minimap=64), use_raw_units=False),
-        step_mul=16, realtime=False
+        step_mul=32, realtime=False
         
     ) as env:
         
@@ -839,101 +836,50 @@ def main(argv):
             #   - 過程獎勵（里程碑）只給方向，終局獎勵才是真正的學習訊號
             # ==========================================
 
-                step_reward = 0.0  # 每一幀開始時，先將本幀獎勵歸零
+                # ==========================================
+                # 🏆 恢復密集獎勵系統 (Dense Reward)
+                # ==========================================
+                step_reward = 0.0
                 
-
-
-                # 追蹤失敗動作次數（不扣分，只計數）
-                if last_action_success == 0.0 and not done:
-                    failed_actions += 1
-
-                # ==========================================
-                # 第一步：科技樹里程碑（追蹤用，不給分）
-                # 設計理念：
-                #   里程碑只用來追蹤建築完成度（x2），
-                #   不再給過程分數，避免 AI 刷建築分數。
-                #   achieved_milestones 的大小會在終局結算時用到。
-                # ==========================================
-
+                # 1. 里程碑獎勵 (立即給予小糖果，指引方向)
                 if "depot" not in achieved_milestones and current_depots >= 1:
                     achieved_milestones.add("depot")
-                    print("補給站里程碑達成")
+                    step_reward += 0.2  # ✨ 立刻給分！
+                    print("👍 補給站里程碑達成 (+0.2)")
 
                 if "barracks" not in achieved_milestones and current_barracks >= 1:
                     achieved_milestones.add("barracks")
-                    print("兵營里程碑達成")
+                    step_reward += 0.4  # ✨ 兵營比較難，給多一點
+                    print("👍 兵營里程碑達成 (+0.4)")
 
                 if "refinery" not in achieved_milestones and current_refineries >= 1:
                     achieved_milestones.add("refinery")
-                    print("瓦斯廠里程碑達成")
+                    step_reward += 0.3  # ✨ 瓦斯廠達成
+                    print("👍 瓦斯廠里程碑達成 (+0.3)")
 
                 if "techlab" not in achieved_milestones and current_techlabs >= 1:
                     achieved_milestones.add("techlab")
-                    print("科技室里程碑達成")
+                    step_reward += 0.6  # ✨ 科技室是最終前置，給大獎
+                    print("👍 科技室里程碑達成 (+0.6)")
 
-                # ==========================================
-                # 第二步：掠奪者產量追蹤（不給過程分）
-                # 設計理念：
-                #   只追蹤數量變化，實際加分在終局統一結算。
-                # ==========================================
+                # 2. 掠奪者產出獎勵
                 if current_real_count > getattr(agent, 'last_target_count', 0):
-                    agent.last_target_count = current_real_count  # 更新追蹤基準
-                    #step_reward += 0.15
-                    print(f"🎯 掠奪者產出！目前進度: {current_real_count}/5")
+                    agent.last_target_count = current_real_count
+                    step_reward += 1.0  # ✨ 每產出一隻給 1.0 的強烈正回饋
+                    print(f"🎯 掠奪者產出！目前進度: {current_real_count}/5 (+1.0)")
 
-                # ==========================================
-                # 第三步：終局判定
-                # ==========================================
+                # 3. 終局結算 (保留作為該局的評分指標，但不完全取代過程獎勵)
                 current_loop = int(next_obs.observation.game_loop[0])
                 done = next_obs.last() or current_loop >= 13440 or current_real_count >= 5
 
-                # ==========================================
-                # 第四步：終局結算（教授 X-Y 軸公式）
-                # Y 軸：造出五隻掠奪者（任務核心目標）
-                # X 軸：產量 + 建築完成度 + 時間效率
-                # ==========================================
-
-
-
                 if done:
-                    # Y 軸
-                    y = min(current_real_count / 5.0, 1.0)
-                    # 0隻=0.0, 1隻=0.2, 2隻=0.4, 3隻=0.6, 4隻=0.8, 5隻=1.0
-
-                    # X 軸三個維度
-                    x1 = y                                         # X1. 掠奪者產量（直接等於Y軸）
-                    x2 = len(achieved_milestones) / 4.0            # X2. 建築完成度（蓋了幾個里程碑）
-                    x3 = 1.0 - (float(current_loop) / 13440.0)      # X3. 時間效率（越快越高)
-                    x4 = max(0.0, 1.0 - (failed_actions / 840.0))   # X4. 動作成功率
-
-
-                    # 成功和失敗用不同公式
-                    if current_real_count >= 5:
-                        # 成功：產量 + 建築 + 時間效率都算
-                        raw_score = 0.6 * x1 + 0.1 * x2 + 0.2 * x3 + 0.1 * x4
-                    else:
-                        # 失敗：只看造了幾隻，直接給負數
-                        # 0隻=-0.7, 1隻=-0.5, 2隻=-0.3, 3隻=-0.1, 4隻=+0.1
-                        raw_score = x1 - 0.7
-
-                    # 統一用 tanh 壓縮到 [-1, +1]
-                    step_reward = raw_score * 3.0
-
-                    # 更新最短時間紀錄（只在成功時）
-                    if current_real_count >= 5 and float(current_loop) < best_record[0]:
-                        best_record[0] = float(current_loop)
-                        with open(best_time_path, "w") as f:
-                            f.write(str(best_record[0]))
-                        print(f"🔥 新紀錄！最短完成時間: {best_record[0]} 幀")
-
-                    print(f"終局: Y={y:.2f}, X1={x1:.2f}, X2={x2:.2f}, X3={x3:.2f},X4={x4:.2f}, raw={raw_score:.4f}")
-                    print(f"📊 失敗動作統計: {failed_actions} 次，總動作數約840，失敗比例: {failed_actions/840.0:.2f}，動作成功率x4: {max(0.0, 1.0 - (failed_actions/840.0)):.2f}")
-
-                # ==========================================
-                # 第五步：tanh 壓縮（核心）
-                # 只有終局幀的 step_reward 不為 0，
-                # 過程幀全部是 0，不干擾訓練。
-                # ==========================================
+                    # 只有在失敗且什麼都沒做的時候才給予巨大懲罰
+                    if current_real_count == 0 and len(achieved_milestones) < 2:
+                         step_reward -= 1.0
+                    elif current_real_count >= 5:
+                         step_reward += 2.0 # 提早完成的終極大獎
+                         
+                # 透過 tanh 壓縮，讓單步獎勵平滑化
                 scaled_reward = math.tanh(step_reward)
                 episode_reward += scaled_reward
                 #episode_reward += scaled_reward  # 累計這局的總分（用於 CSV 記錄與排行榜）
