@@ -16,7 +16,7 @@ import math
 import pygame
 
 import os
-os.environ["SC2PATH"] = r"D:\StarCraft II"
+os.environ["SC2PATH"] = r"C:\Program Files (x86)\StarCraft II"
 # 匯入底層腳本
 # --- train_dqn_on_top.py 的最上方 ---
 import production_ai
@@ -218,7 +218,7 @@ def main(argv):
 
     RENDER_UI = True # 總開關
     pygame.init()
-    screen = pygame.display.set_mode((1200, 700))
+    screen = pygame.display.set_mode((1600, 900))
     pygame.display.set_caption("DRQN 決策中樞 - 中文化遮罩版")
     
     # 菁英記憶：改成 List，用來做排行榜
@@ -269,164 +269,621 @@ def main(argv):
         import torch
         import pygame
 
-        # ==========================================
-        # ✨ 畫質革命：SSAA 超採樣反鋸齒設定
-        # ==========================================
-        SCALE = 2  
+        SCALE = 1.4   # ⭐ 不要用2，會卡
         sw, sh = surface.get_size()
-        hq_surface = pygame.Surface((sw * SCALE, sh * SCALE))
-        
-        # 🎨 1. 賽博龐克背景色：極深的深藍/黑色
-        hq_surface.fill((10, 12, 18)) 
-        
-        # 嘗試載入支援中文的字體
-        font_candidates = ['microsoftjhenghei', 'microsoftyahei', 'simhei', 'msgothic', 'arialunicode']
-        font = None
-        for f_name in font_candidates:
-            try:
-                test_font = pygame.font.SysFont(f_name, 13 * SCALE, bold=True)
-                font = test_font
-                break
-            except:
-                continue
-        if font is None:
-            font = pygame.font.SysFont("arial", 13 * SCALE)
-        num_font = pygame.font.SysFont("arial", 10 * SCALE, bold=True) # 數字加粗更醒目
+        hq_surface = pygame.Surface((int(sw * SCALE), int(sh * SCALE)))
 
-        # 🏷️ 變數名稱標準化
-        input_labels = [
-            "工兵總數 (22)", "閒置工兵 (10)", "晶礦比例 (400)", "瓦斯比例 (200)", 
-            "資源差距 (M-V)", "目前人口 (200)", "剩餘人口 (20)", "補給站數 (3)", 
-            "瓦斯廠數 (2)", "軍營數量 (2)", "科技室數 (1)", "選中工兵 (0/1)", 
-            "選中主堡 (0/1)", "選中兵營 (0/1)", "陸戰隊數 (50)", "掠奪者數 (5)", 
-            "上一動作成功", "上一動作ID(50)", "上一次區塊(64)", "時間進度 (13k)" 
-        ]
-        
+        hq_surface.fill((10, 12, 18))
+
+        font = pygame.font.SysFont("microsoftjhenghei", int(12 * SCALE))
+        num_font = pygame.font.SysFont("arial", int(10 * SCALE), bold=True)
+
+        # ===== 自動維度 =====
+        STATE_DIM = len(state_vector)
+
+        input_labels = [f"特徵{i}" for i in range(STATE_DIM)]
+
         action_labels = [
-            "蓋補給站", "蓋兵營", "蓋瓦斯廠", "製造工兵", "造陸戰隊", 
-            "造掠奪者", "兵營升級", "閒置採礦", "指派瓦斯", "發呆休息", "主堡編隊"
+            "蓋補給站","蓋兵營","蓋瓦斯","造工兵","造陸戰隊",
+            "造掠奪者","升級","採礦","採氣","待機","編隊"
         ]
 
-        # 2. 獲取當前決策狀態
+        # ===== 推論 =====
         device = next(model.parameters()).device
-        model.eval()
         with torch.no_grad():
-            state_t = torch.FloatTensor(np.array(state_vector)).unsqueeze(0).to(device)
+            s = torch.FloatTensor(np.array(state_vector)).unsqueeze(0).to(device)
             if hidden_state is None:
-                hidden_state = (torch.zeros(1, 1, 128).to(device), torch.zeros(1, 1, 128).to(device))
-            
-            q_actions, _, _ = model(state_t, hidden_state)
-            q_vals = q_actions.cpu().numpy()[0]
-            best_action_idx = int(np.argmax(q_vals))
+                hidden_state = (torch.zeros(1,1,128).to(device), torch.zeros(1,1,128).to(device))
+            q,_,_ = model(s, hidden_state)
+            q_vals = q.cpu().numpy()[0]
+            best = int(np.argmax(q_vals))
 
-        # ==========================================
-        # 3. 座標佈局 (維持寬螢幕比例不變)
-        # ==========================================
-        in_pos = [(150 * SCALE, (y * 30 + 50) * SCALE) for y in range(20)]    
-        fc1_pos = [(400 * SCALE, (y * 40 + 100) * SCALE) for y in range(12)]  
-        lstm_pos = [(750 * SCALE, (y * 40 + 100) * SCALE) for y in range(12)] 
-        act_pos = [(1050 * SCALE, (y * 45 + 100) * SCALE) for y in range(11)] 
+        # ===== 自動排版（重點）=====
+        layer_x = np.linspace(80*SCALE, sw*SCALE-80*SCALE, 4)
+
+        in_pos   = [(layer_x[0], (i/(STATE_DIM-1+1e-5)*sh*SCALE*0.8 + 50*SCALE)) for i in range(STATE_DIM)]
+        fc1_pos  = [(layer_x[1], (i/11*sh*SCALE*0.8 + 50*SCALE)) for i in range(12)]
+        lstm_pos = [(layer_x[2], (i/11*sh*SCALE*0.8 + 50*SCALE)) for i in range(12)]
+        act_pos  = [(layer_x[3], (i/10*sh*SCALE*0.8 + 50*SCALE)) for i in range(11)]
 
         fc1_w = model.fc1.weight.data.cpu().numpy()
         lstm_w = model.lstm.weight_ih_l0.data.cpu().numpy()[:128, :]
         act_w = model.fc_action.weight.data.cpu().numpy()
 
-        # ==========================================
-        # 5. 繪製連線 (🎨 霓虹螢光配色)
-        # ==========================================
-        
-        # A. 輸入層 -> FC1 特徵層 
-        for h_idx in range(12): 
-            actual_h = h_idx * 10
-            weights = fc1_w[actual_h, :]
-            top_2_inputs = np.argsort(np.abs(weights))[-2:]
-            
-            for i in range(20):
-                w = weights[i]
-                if i in top_2_inputs and abs(w) > 0.1:
-                    # 正權重：霓虹青 (Cyan) / 負權重：賽博粉 (Magenta)
-                    color = (0, 200, 255) if w > 0 else (255, 50, 150)
-                    active_multiplier = 2.0 if state_vector[i] > 0.1 else 0.5
-                    width = max(1, int(abs(w) * 4 * active_multiplier)) * SCALE
-                    pygame.draw.line(hq_surface, color, in_pos[i], fc1_pos[h_idx], width)
+        # ===== 畫線 =====
+        for h in range(12):
+            w = fc1_w[h*10]
+            top = np.argsort(np.abs(w))[-2:]
+            for i in range(STATE_DIM):
+                if i in top:
+                    col = (0,200,255) if w[i]>0 else (255,50,150)
+                    pygame.draw.line(hq_surface, col, in_pos[i], fc1_pos[h], 2)
 
-        # B. FC1 特徵層 -> LSTM 記憶層 
-        for j in range(12): 
-            actual_j = j * 10
-            for i in range(12): 
-                actual_i = i * 10
-                w = lstm_w[actual_j, actual_i]
-                abs_w = abs(w)
-                
-                if abs_w > 0.05: 
-                    if w > 0:
-                        # 高權重：亮青色 / 低權重：暗藍綠色
-                        color = (0, 200, 255) if abs_w > 0.15 else (0, 80, 120)
-                    else:
-                        # 高權重：亮粉紅 / 低權重：暗紫紅色
-                        color = (255, 50, 150) if abs_w > 0.15 else (120, 20, 70)
-                    
-                    width = max(1, int(abs_w * 15)) * SCALE
-                    pygame.draw.line(hq_surface, color, fc1_pos[i], lstm_pos[j], width)
+        for j in range(12):
+            for i in range(12):
+                w = lstm_w[j*10][i*10]
+                if abs(w)>0.05:
+                    col = (0,200,255) if w>0 else (255,50,150)
+                    pygame.draw.line(hq_surface, col, fc1_pos[i], lstm_pos[j], 1)
 
-        # C. LSTM 記憶層 -> 動作層 
-        for a_idx in range(11):
-            if a_idx not in allowed_indices: continue
-            
-            weights = act_w[a_idx, :]
-            sampled_weights = [weights[h * 10] for h in range(12)]
-            top_2_hidden = np.argsort(np.abs(sampled_weights))[-2:]
+        for a in range(11):
+            if a not in allowed_indices: continue
+            w = act_w[a]
+            top = np.argsort(np.abs([w[i*10] for i in range(12)]))[-2:]
+            for i in range(12):
+                if i in top:
+                    col = (0,200,255) if w[i*10]>0 else (255,50,150)
+                    width = 3 if a==best else 1
+                    pygame.draw.line(hq_surface, col, lstm_pos[i], act_pos[a], width)
 
-            for h_idx in range(12):
-                actual_h = h_idx * 10
-                w = act_w[a_idx, actual_h]
-                if h_idx in top_2_hidden and abs(w) > 0.1:
-                    color = (0, 200, 255) if w > 0 else (255, 50, 150)
-                    is_active_path = (a_idx == best_action_idx)
-                    width = max(1, int(abs(w) * (6 if is_active_path else 2))) * SCALE
-                    pygame.draw.line(hq_surface, color, lstm_pos[h_idx], act_pos[a_idx], width)
-
-        # ==========================================
-        # 🎨 6. 節點渲染 (全息科技風格)
-        # ==========================================
-        def draw_neat_node(pos, label, num, side="left", active_val=0, is_best=False, is_masked=False):
-            if is_masked:
-                # 被遮罩：極暗灰
-                fill_color, border_color, text_color = (20, 20, 20), (50, 50, 50), (100, 100, 100)
-            elif is_best:
-                # 最終決策：亮青色發光
-                fill_color, border_color, text_color = (0, 80, 150), (0, 255, 255), (255, 255, 255)
-            elif active_val > 0.1:
-                # 活躍輸入：亮綠色發光
-                fill_color, border_color, text_color = (0, 100, 50), (0, 255, 100), (255, 255, 255)
+        # ===== 畫節點 =====
+        def node(pos, txt, active=False, best=False, masked=False):
+            if masked:
+                fill=(30,30,30); border=(70,70,70)
+            elif best:
+                fill=(0,120,200); border=(0,255,255)
+            elif active:
+                fill=(0,100,50); border=(0,255,100)
             else:
-                # 一般未啟動狀態：深底色搭配暗藍邊框
-                fill_color, border_color, text_color = (15, 20, 25), (40, 80, 120), (200, 200, 200)
+                fill=(15,20,25); border=(50,100,150)
 
-            radius = 13 * SCALE
-            pygame.draw.circle(hq_surface, fill_color, pos, radius)
-            pygame.draw.circle(hq_surface, border_color, pos, radius, 2 * SCALE)
+            pygame.draw.circle(hq_surface, fill, pos, int(10*SCALE))
+            pygame.draw.circle(hq_surface, border, pos, int(10*SCALE), 2)
+
+            t = num_font.render(str(txt), True, (255,255,255))
+            hq_surface.blit(t, (pos[0]-t.get_width()//2, pos[1]-t.get_height()//2))
+
+        for i,p in enumerate(in_pos): node(p,i, state_vector[i]>0.1)
+        for i,p in enumerate(fc1_pos): node(p,i)
+        for i,p in enumerate(lstm_pos): node(p,i)
+        for i,p in enumerate(act_pos):
+            node(p,i, best=(i==best and i in allowed_indices), masked=(i not in allowed_indices))
+
+        final = pygame.transform.smoothscale(hq_surface,(sw,sh))
+        surface.blit(final,(0,0))
             
-            n_txt = num_font.render(str(num), True, text_color)
-            hq_surface.blit(n_txt, (pos[0]-n_txt.get_width()//2, pos[1]-n_txt.get_height()//2))
+    # =========================================================
+    # HUD Dashboard：不用嵌 SC2 視窗，左上用 feature_screen 畫戰場
+    # =========================================================
+
+    ACTION_NAMES = {
+        1: "Build Depot",
+        2: "Build Barracks",
+        11: "Build Refinery",
+        14: "Train SCV",
+        16: "Train Marine",
+        18: "Train Marauder",
+        34: "Build TechLab",
+        41: "Gather Minerals",
+        42: "Assign Gas",
+        44: "Idle",
+        45: "Bind CC"
+    }
+
+    HUD_HISTORY = {
+        "minerals": deque(maxlen=120),
+        "vespene": deque(maxlen=120),
+    }
+
+    def ui_colors():
+        return {
+            "bg": (6, 18, 24),
+            "panel": (8, 26, 34),
+            "panel2": (12, 34, 44),
+            "border": (70, 220, 210),
+            "title": (150, 255, 235),
+            "text": (190, 255, 245),
+            "good": (120, 255, 130),
+            "warn": (255, 205, 90),
+            "bad": (255, 100, 100),
+            "cyan": (80, 220, 255),
+            "gray": (85, 105, 115),
+            "darkgray": (45, 55, 60),
+        }
+
+    def get_fonts():
+        return {
+            "title": pygame.font.SysFont("microsoftjhenghei", 22, bold=True),
+            "header": pygame.font.SysFont("microsoftjhenghei", 18, bold=True),
+            "text": pygame.font.SysFont("microsoftjhenghei", 16),
+            "small": pygame.font.SysFont("microsoftjhenghei", 14),
+            "timer": pygame.font.SysFont("consolas", 42, bold=True),
+        }
+
+    def draw_glow_rect(surface, rect, fill, border, border_width=2):
+        pygame.draw.rect(surface, fill, rect, border_radius=8)
+        pygame.draw.rect(surface, border, rect, border_width, border_radius=8)
+
+    def draw_panel(surface, rect, title, fonts, colors):
+        draw_glow_rect(surface, rect, colors["panel"], colors["border"], 2)
+        txt = fonts["title"].render(title, True, colors["title"])
+        surface.blit(txt, (rect[0] + 12, rect[1] + 10))
+
+    def count_units_from_screen(obs, unit_id, pixels_per_unit=1.0):
+        unit_type = obs.observation.feature_screen.unit_type
+        player_rel = obs.observation.feature_screen.player_relative
+        pixels = np.sum((unit_type == unit_id) & (player_rel == 1))
+        if pixels_per_unit <= 1:
+            return int(pixels)
+        return int(np.round(float(pixels) / float(pixels_per_unit)))
+
+    def get_dashboard_snapshot(obs):
+        player = obs.observation.player
+        current_loop = int(obs.observation.game_loop[0])
+
+        return {
+            "minerals": int(player.minerals),
+            "vespene": int(player.vespene),
+            "workers": int(player.food_workers),
+            "food_used": int(player.food_used),
+            "food_cap": int(player.food_cap),
+            "idle_workers": int(player.idle_worker_count),
+            "depots": count_units_from_screen(obs, 19, 69.0),
+            "refineries": count_units_from_screen(obs, 20, 97.0),
+            "barracks": count_units_from_screen(obs, 21, 137.0),
+            "techlabs": count_units_from_screen(obs, 37, 85.0),
+            "marines": count_units_from_screen(obs, 48, 10.0),
+            "marauders": count_units_from_screen(obs, 51, 10.0),
+            "loop": current_loop,
+            "remain_loop": max(0, 13440 - current_loop),
+        }
+
+    def format_loop_to_mmss(loop_value):
+        total_seconds = int((loop_value / 13440.0) * 600)
+        return f"{total_seconds // 60:02d}:{total_seconds % 60:02d}"
+
+    def draw_feature_game_panel(surface, rect, obs, fonts, colors):
+        draw_panel(surface, rect, "AGENT CONTROL - Feature Screen", fonts, colors)
+
+        x, y, w, h = rect
+        inner = pygame.Rect(x + 12, y + 45, w - 24, h - 57)
+        pygame.draw.rect(surface, (15, 30, 38), inner, border_radius=6)
+
+        unit_type = obs.observation.feature_screen.unit_type
+        player_rel = obs.observation.feature_screen.player_relative
+
+        sh, sw = unit_type.shape
+        sx = inner.width / float(sw)
+        sy = inner.height / float(sh)
+
+        # 礦
+        mineral_pts = np.argwhere(unit_type == 341)
+        step = max(1, len(mineral_pts) // 120 + 1)
+        for yy, xx in mineral_pts[::step]:
+            px = int(inner.x + xx * sx)
+            py = int(inner.y + yy * sy)
+            pygame.draw.circle(surface, (70, 140, 255), (px, py), 3)
+
+        # 我方
+        own_pts = np.argwhere(player_rel == 1)
+        step = max(1, len(own_pts) // 250 + 1)
+        for yy, xx in own_pts[::step]:
+            px = int(inner.x + xx * sx)
+            py = int(inner.y + yy * sy)
+            pygame.draw.circle(surface, colors["good"], (px, py), 3)
+
+        # 敵方
+        enemy_pts = np.argwhere(player_rel == 4)
+        step = max(1, len(enemy_pts) // 150 + 1)
+        for yy, xx in enemy_pts[::step]:
+            px = int(inner.x + xx * sx)
+            py = int(inner.y + yy * sy)
+            pygame.draw.circle(surface, colors["bad"], (px, py), 3)
+
+    def q_values_to_confidence(q_values, allowed_indices):
+        q = np.array(q_values, dtype=np.float32)
+        masked = np.full_like(q, -1e9)
+
+        for idx in allowed_indices:
+            if 0 <= idx < len(q):
+                masked[idx] = q[idx]
+
+        exp_q = np.exp(masked - np.max(masked))
+        return exp_q / max(np.sum(exp_q), 1e-6)
+
+    def draw_bar(surface, x, y, w, h, value, fg, bg):
+        pygame.draw.rect(surface, bg, (x, y, w, h), border_radius=4)
+        fill_w = int(max(0, min(1, value)) * w)
+        pygame.draw.rect(surface, fg, (x, y, fill_w, h), border_radius=4)
+
+    def draw_action_table(surface, rect, q_values, allowed_indices, valid_actions, fonts, colors):
+        draw_panel(surface, rect, "Current Action Intent & Masks", fonts, colors)
+
+        x, y, w, h = rect
+        conf = q_values_to_confidence(q_values, allowed_indices)
+        best_idx = int(np.argmax(q_values)) if len(q_values) > 0 else -1
+
+        surface.blit(fonts["header"].render("Action", True, colors["text"]), (x + 15, y + 50))
+        surface.blit(fonts["header"].render("Confidence", True, colors["text"]), (x + 210, y + 50))
+        surface.blit(fonts["header"].render("Mask", True, colors["text"]), (x + 360, y + 50))
+
+        row_y = y + 82
+        for i, act_id in enumerate(valid_actions):
+            yy = row_y + i * 28
+            is_open = i in allowed_indices
+            is_best = i == best_idx and is_open
+
+            color = colors["warn"] if is_best else (colors["good"] if is_open else colors["gray"])
+            name = ACTION_NAMES.get(act_id, f"Action {act_id}")
+
+            if is_best:
+                pygame.draw.rect(surface, (28, 50, 60), (x + 8, yy - 2, w - 16, 24), border_radius=4)
+
+            surface.blit(fonts["text"].render(name, True, color), (x + 15, yy))
+            draw_bar(surface, x + 210, yy + 5, 120, 14, float(conf[i]), colors["good"], (20, 40, 46))
+            surface.blit(fonts["small"].render(f"{int(conf[i] * 100)}%", True, color), (x + 335, yy))
+            surface.blit(fonts["text"].render("OPEN" if is_open else "LOCK", True, color), (x + 380, yy))
+
+    def draw_resource_panel(surface, rect, obs, fonts, colors):
+        draw_panel(surface, rect, "Current Resources", fonts, colors)
+        x, y, w, h = rect
+        s = get_dashboard_snapshot(obs)
+
+        items = [
+            ("Minerals", s["minerals"], colors["cyan"]),
+            ("Vespene", s["vespene"], colors["good"]),
+            ("SCV", s["workers"], colors["text"]),
+            ("Supply", f'{s["food_used"]}/{s["food_cap"]}', colors["warn"]),
+            ("Barracks", s["barracks"], colors["text"]),
+            ("TechLab", s["techlabs"], colors["text"]),
+            ("Marauders", s["marauders"], colors["good"]),
+        ]
+
+        for i, (label, value, color) in enumerate(items):
+            yy = y + 45 + i * 25
+            surface.blit(fonts["text"].render(label, True, colors["text"]), (x + 15, yy))
+            txt = fonts["text"].render(str(value), True, color)
+            surface.blit(txt, (x + w - 20 - txt.get_width(), yy))
+
+    def draw_timer_panel(surface, rect, obs, fonts, colors):
+        draw_panel(surface, rect, "Mission Timer", fonts, colors)
+        x, y, w, h = rect
+        s = get_dashboard_snapshot(obs)
+
+        surface.blit(fonts["timer"].render(format_loop_to_mmss(s["remain_loop"]), True, colors["cyan"]), (x + 20, y + 50))
+
+        status = f'{s["marauders"]}/5 Marauders Target'
+        surface.blit(fonts["header"].render(status, True, colors["good"]), (x + 20, y + 110))
+
+    def draw_timeline(surface, rect, obs, fonts, colors):
+        draw_panel(surface, rect, "Production Milestone Timeline", fonts, colors)
+        x, y, w, h = rect
+        s = get_dashboard_snapshot(obs)
+
+        milestones = [
+            ("Start", True),
+            ("Depot", s["depots"] >= 1),
+            ("Barracks", s["barracks"] >= 1),
+            ("Refinery", s["refineries"] >= 1),
+            ("TechLab", s["techlabs"] >= 1),
+            ("Target(5)", s["marauders"] >= 5),
+        ]
+
+        line_y = y + 70
+        start_x = x + 35
+        end_x = x + w - 35
+        pygame.draw.line(surface, colors["gray"], (start_x, line_y), (end_x, line_y), 3)
+
+        for i, (label, done) in enumerate(milestones):
+            px = start_x + int(i / (len(milestones) - 1) * (end_x - start_x))
+            c = colors["good"] if done else colors["darkgray"]
+            pygame.draw.circle(surface, c, (px, line_y), 9)
+            pygame.draw.circle(surface, colors["border"], (px, line_y), 9, 2)
+            txt = fonts["small"].render(label, True, c)
+            surface.blit(txt, (px - txt.get_width() // 2, line_y + 18))
+        progress = min(1.0, s["loop"] / 13440)
+
+        bar_x = rect[0] + 30
+        bar_y = rect[1] + rect[3] - 22
+        bar_w = rect[2] - 60
+        bar_h = 10
+
+        pygame.draw.rect(surface, (40, 60, 70), (bar_x, bar_y, bar_w, bar_h), border_radius=5)
+        pygame.draw.rect(surface, colors["cyan"], (bar_x, bar_y, int(bar_w * progress), bar_h), border_radius=5)    
+
+
+
+
+    def draw_sparkline(surface, rect, values, color, fonts, colors, title):
+        draw_glow_rect(surface, rect, colors["panel2"], colors["border"], 1)
+        x, y, w, h = rect
+
+        surface.blit(
+            fonts["small"].render(title, True, colors["title"]),
+            (x + 8, y + 6)
+        )
+
+        if len(values) < 2:
+            return
+
+        arr = np.array(values, dtype=np.float32)
+        mn, mx = float(np.min(arr)), float(np.max(arr))
+
+        if abs(mx - mn) < 1e-6:
+            mx = mn + 1
+
+        pts = []
+        for i, v in enumerate(arr):
+            px = x + 8 + int(i / max(1, len(arr) - 1) * (w - 16))
+            py = y + h - 8 - int((v - mn) / (mx - mn) * (h - 35))
+            pts.append((px, py))
+
+        pygame.draw.lines(surface, color, False, pts, 2)
+
+        latest = fonts["small"].render(str(int(arr[-1])), True, color)
+        surface.blit(latest, (x + w - latest.get_width() - 8, y + 6))
+
+    def draw_small_info(surface, rect, title, value, fonts, colors, history_values=None, line_color=None):
+        draw_panel(surface, rect, title, fonts, colors)
+
+        # 標題
+        
+
+        # 數字
+        val_txt = fonts["header"].render(str(value), True, colors["text"])
+        surface.blit(val_txt, (rect[0] + 12, rect[1] + 30))
+
+        # 小折線圖
+        if history_values is not None and len(history_values) >= 2:
+            arr = np.array(history_values, dtype=np.float32)
+            mn, mx = float(np.min(arr)), float(np.max(arr))
+            if abs(mx - mn) < 1e-6:
+                mx = mn + 1
+
+            graph_x = rect[0] + int(rect[2] * 0.48)
+            graph_y = rect[1] + 22
+            graph_w = int(rect[2] * 0.46)
+            graph_h = rect[3] - 30
+
+            pts = []
+            for i, v in enumerate(arr):
+                px = graph_x + int(i / max(1, len(arr) - 1) * graph_w)
+                py = graph_y + graph_h - int((v - mn) / (mx - mn) * graph_h)
+                pts.append((px, py))
+
+            pygame.draw.lines(surface, line_color or colors["cyan"], False, pts, 2)
+
+    def draw_current(surface, rect, q_values, allowed_indices, valid_actions, fonts, colors):
+        draw_panel(surface, rect, "Current Action Intent & Masks", fonts, colors)
+
+        x, y, w, h = rect
+        conf = q_values_to_confidence(q_values, allowed_indices)
+
+        # 欄位位置
+        col_action = x + 18
+        col_conf   = x + 210
+        col_mask   = x + 380
+        col_tech   = x + 500
+
+        header_y = y + 30
+        row_y = y + 65
+        row_h = 28
+
+        # 表頭
+        surface.blit(fonts["header"].render("Action", True, colors["text"]), (col_action, header_y))
+        surface.blit(fonts["header"].render("Confidence", True, colors["text"]), (col_conf, header_y))
+        surface.blit(fonts["header"].render("Mask Status", True, colors["text"]), (col_mask, header_y))
+        surface.blit(fonts["header"].render("Tech-Tree", True, colors["text"]), (col_tech, header_y))
+
+        # 只顯示前 5 個最高信心動作
+        order = np.argsort(conf)[::-1][:8]
+
+        for rank, i in enumerate(order):
+            act_id = valid_actions[i]
+            name = ACTION_NAMES.get(act_id, f"Action {act_id}")
+
+            is_open = i in allowed_indices
+            pct = int(conf[i] * 100)
+
+            yy = row_y + rank * row_h
+
+            # 交錯底色
+            bg = (16, 42, 48) if rank % 2 == 0 else (20, 50, 56)
+            pygame.draw.rect(surface, bg, (x + 10, yy - 4, w - 20, row_h))
+
+            text_color = colors["good"] if is_open else colors["gray"]
+
+            # Action
+            surface.blit(fonts["text"].render(name, True, text_color), (col_action, yy))
+
+            # Confidence bar
+            bar_x = col_conf
+            bar_y = yy + 4
+            bar_w = 120
+            bar_h = 14
+
+            pygame.draw.rect(surface, (10, 28, 32), (bar_x, bar_y, bar_w, bar_h))
+            pygame.draw.rect(surface, colors["good"], (bar_x, bar_y, int(bar_w * pct / 100), bar_h))
+
+            pct_txt = fonts["small"].render(f"{pct}%", True, text_color)
+            surface.blit(pct_txt, (bar_x + bar_w + 8, yy))
+
+            # Mask Status
+            mask_text = "OPEN" if is_open else "LOCK"
+            mask_color = colors["good"] if is_open else colors["bad"]
+            surface.blit(fonts["small"].render(mask_text, True, mask_color), (col_mask, yy))
+
+            # Tech Tree
+            tech_text = "OK" if is_open else "BLOCK"
+            tech_color = colors["good"] if is_open else colors["bad"]
+            surface.blit(fonts["small"].render(tech_text, True, tech_color), (col_tech, yy))
+
+    def draw_full_hud(surface, obs, brain_model, state_vector, allowed_indices, hidden_state, valid_actions):
+        colors = ui_colors()
+        fonts = get_fonts()
+        surface.fill(colors["bg"])
+
+        s = get_dashboard_snapshot(obs)
+        HUD_HISTORY["minerals"].append(s["minerals"])
+        HUD_HISTORY["vespene"].append(s["vespene"])
+
+        device = next(brain_model.parameters()).device
+        with torch.no_grad():
+            st = torch.FloatTensor(np.array(state_vector)).unsqueeze(0).to(device)
+            q_actions, _, _ = brain_model(st, hidden_state)
+            q_values = q_actions.cpu().numpy()[0]
+
+        LEFT = 20
+        TOP = 20
+        GAP = 10
+
+        LEFT_W = 880
+        RIGHT_W = 620
+        TOP_H = 480
+
+        # ===== 上排 =====
+        game_rect = (LEFT, TOP, LEFT_W, TOP_H)
+        network_rect = (LEFT + LEFT_W + GAP, TOP, RIGHT_W, TOP_H)
+
+        # ===== 中排 =====
+        mid_y = TOP + TOP_H + GAP
+        mid_h = 160
+
+        # ⭐ 一定要有這行（你現在缺這個）
+        timer_w = 180
+        timer_rect = (LEFT, mid_y, timer_w, mid_h)
+
+        # 小資訊
+        info_w = (LEFT_W - timer_w - GAP*2) // 2
+        info_h = (mid_h - GAP) // 2
+
+        x1 = LEFT + timer_w + GAP
+        x2 = x1 + info_w + GAP
+
+        info1_rect = (x1, mid_y, info_w, info_h)
+        info2_rect = (x2, mid_y, info_w, info_h)
+        info3_rect = (x1, mid_y + info_h + GAP, info_w, info_h)
+        info4_rect = (x2, mid_y + info_h + GAP, info_w, info_h)
+
+        # ===== 下排 =====
+        timeline_y = mid_y + mid_h + GAP
+        timeline_h = 140
+
+        timeline_rect = (LEFT, timeline_y, LEFT_W, timeline_h)
+
+        # ===== Current =====
+        current_rect = (
+            LEFT + LEFT_W + GAP,
+            mid_y,
+            RIGHT_W,
+            timeline_y + timeline_h - mid_y
+        )    
+
+        # 1️⃣ 先畫外框
+        draw_glow_rect(surface, network_rect, colors["panel"], colors["border"], 2)
+
+        # 2️⃣ 畫標題
+        surface.blit(fonts["header"].render("DRQN Network", True, colors["title"]),
+                    (network_rect[0] + 12, network_rect[1] + 10))
+
+        # 3️⃣ 畫內容
+        sub_rect = pygame.Rect(
+            network_rect[0] + 10,
+            network_rect[1] + 40,
+            network_rect[2] - 20,
+            network_rect[3] - 50
+        )
+
+        if sub_rect.width > 0 and sub_rect.height > 0:
+            sub_surface = surface.subsurface(sub_rect)
+
+            draw_dual_head_network(
+                sub_surface,
+                brain_model,
+                state_vector,
+                allowed_indices,
+                hidden_state
+            )
+
+        # ⭐ 建立子畫面區域
+        sub_rect = pygame.Rect(
+            network_rect[0] + 10,
+            network_rect[1] + 40,
+            network_rect[2] - 20,
+            network_rect[3] - 50
+        )
+
+        if sub_rect.width > 0 and sub_rect.height > 0:
+            sub_surface = surface.subsurface(sub_rect)
+
+            # ⭐ 直接畫進 sub_surface（不用 temp_surface）
+            draw_dual_head_network(
+                sub_surface,
+                brain_model,
+                state_vector,
+                allowed_indices,
+                hidden_state
+            )
             
-            if label:
-                # 🎨 文字顏色反白，被遮罩的字變暗灰
-                l_txt = font.render(label, True, (220, 230, 240) if not is_masked else (100, 100, 100))
-                x_off = (-105 * SCALE) if side == "left" else (25 * SCALE)
-                y_off = -8 * SCALE
-                hq_surface.blit(l_txt, (pos[0] + x_off, pos[1] + y_off))
+        # 左上
+        draw_feature_game_panel(surface, game_rect, obs, fonts, colors)
+       
+        # 中間資訊
+        s = get_dashboard_snapshot(obs)
 
-        for i, pos in enumerate(in_pos): draw_neat_node(pos, input_labels[i], i, "left", state_vector[i])
-        for i, pos in enumerate(fc1_pos): draw_neat_node(pos, None, i + 100)
-        for i, pos in enumerate(lstm_pos): draw_neat_node(pos, None, i + 200)
-        for i, pos in enumerate(act_pos):
-            is_masked = (i not in allowed_indices)
-            draw_neat_node(pos, action_labels[i], i, "right", 0, is_best=(i == best_action_idx and not is_masked), is_masked=is_masked)
+        draw_panel(surface, timer_rect, "Timer", fonts, colors)
+        surface.blit(
+            fonts["header"].render(format_loop_to_mmss(s["remain_loop"]), True, colors["cyan"]),
+            (timer_rect[0] + 10, timer_rect[1] + 60)
+        )
 
-        # 🎬 平滑縮小並貼回真實螢幕
-        final_image = pygame.transform.smoothscale(hq_surface, (sw, sh))
-        surface.blit(final_image, (0, 0))
+        draw_small_info(surface, info1_rect, "Marauders", s["marauders"], fonts, colors)
+
+        # ⭐ 把 Minerals 放到 info2
+        draw_small_info(
+            surface,
+            info2_rect,
+            "Minerals",
+            s["minerals"],
+            fonts,
+            colors,
+            HUD_HISTORY["minerals"],
+            colors["cyan"]
+        )
+
+        # ⭐ 把 Supply 放到 info3
+        draw_small_info(surface, info3_rect, "Supply", f"{s['food_used']}/{s['food_cap']}", fonts, colors)
+
+        draw_small_info(
+            surface,
+            info4_rect,
+            "Gas",
+            s["vespene"],
+            fonts,
+            colors,
+            HUD_HISTORY["vespene"],
+            colors["good"]
+        )
+
+
+        # 右下決策
+        draw_current(surface, current_rect, q_values, allowed_indices, valid_actions, fonts, colors)
+
+
+        # 底部 timeline
+        draw_timeline(surface, timeline_rect, obs, fonts, colors)
+
+        pygame.display.flip()
 
     def get_action_mask(target_obs, last_act_id=0): 
         """ 根據當前畫面狀態，回傳合法的 Action 索引列表 """
@@ -764,15 +1221,24 @@ def main(argv):
 
                 # ... 在你的訓練迴圈內 ...
 
-                if RENDER_UI and train_step_counter % 2 == 0:
-                    # ✨ 核心修正：加入這兩行，讓視窗學會「聽話」
+                if RENDER_UI and train_step_counter % 5 == 0:   # ⭐ 降頻
+
                     for event in pygame.event.get():
                         if event.type == pygame.QUIT:
                             pygame.quit()
-                            return # 讓你可以手動關閉視窗結束訓練
+                            return
 
-                    # 執行原本的繪圖
-                    draw_dual_head_network(screen, brain_model, state, allowed_indices, hidden_state)
+                    draw_full_hud(
+                        screen,
+                        obs,
+                        brain_model,
+                        state,
+                        allowed_indices,
+                        hidden_state,
+                        VALID_ACTIONS
+                    )
+
+                    # 執行原本的繪圖                    
                     pygame.display.flip()
 
                 # ==========================================
