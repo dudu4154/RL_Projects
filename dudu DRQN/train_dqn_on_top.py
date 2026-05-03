@@ -15,14 +15,32 @@ import copy
 import math
 import pygame
 
-import os
-os.environ["SC2PATH"] = r"C:\Program Files (x86)\StarCraft II"
 # 匯入底層腳本
 # --- train_dqn_on_top.py 的最上方 ---
 import production_ai
 from production_ai import ProductionAI
 import logging
 from absl import logging as absl_logging
+
+# 1. 嘗試讀取系統環境變數 SC2PATH
+sc2_path = os.environ.get("SC2PATH")
+
+# 2. 如果系統裡沒設定，提供幾個常見的預設路徑讓它自己去試
+if not sc2_path:
+    common_paths = [
+        r"C:\Program Files (x86)\StarCraft II",
+        r"D:\StarCraft II",
+        r"E:\StarCraft II",
+        "/Applications/StarCraft II" # Mac 預設路徑
+    ]
+    for path in common_paths:
+        if os.path.exists(path):
+            sc2_path = path
+            os.environ["SC2PATH"] = path
+            break
+
+if not sc2_path:
+    print("⚠️ 警告：找不到 StarCraft II 安裝路徑！請設定環境變數 SC2PATH。")
 
 # 屏蔽 features.py 產出的警告訊息
 absl_logging.set_verbosity(absl_logging.ERROR)
@@ -1002,18 +1020,20 @@ def main(argv):
             hidden = (h_in.to(device), c_in.to(device))
             
             for step_data in sequence:
-                # 📦 完整解包 10 個參數
+                # 📦 完整解包現在變成 11 個參數了
                 state = torch.FloatTensor([step_data[0]]).to(device)
                 action = torch.LongTensor([step_data[1]]).to(device)
                 param_target = torch.LongTensor([step_data[2]]).to(device)
                 reward = torch.FloatTensor([step_data[3]]).to(device)
                 next_state = torch.FloatTensor([step_data[4]]).to(device)
                 done = step_data[5]
-                # step_data[6] 是 hidden_in，由外部維護
                 h_out, c_out = step_data[7]
                 hidden_out = (h_out.to(device), c_out.to(device))
                 gamma_mult = step_data[8]
                 next_allowed = step_data[9]
+                
+                # ✨ 核心修復 3A：拿出真正的單步成功鐵證
+                step_success_flag = step_data[10]
 
                 # 🧠 第一大腦預測分數
                 q_actions, q_params, next_hidden = brain_model(state, hidden)
@@ -1034,7 +1054,10 @@ def main(argv):
                 # ⚖️ 計算損失並更新
                 action_loss = nn.SmoothL1Loss()(q_value, target_q)
                 param_loss = torch.tensor(0.0).to(device)
-                if reward > 0:
+                
+                # ✨ 核心修復 3B：只有當「這一步的滑鼠點擊真正被引擎接受 (success == 1.0)」時，
+                # 我們才允許神經網路去記住這個 p_id！不再被未來總分 (reward) 給騙了！
+                if step_success_flag == 1.0:
                     param_loss = nn.CrossEntropyLoss()(q_params, param_target)
                 
                 total_loss += (action_loss + 0.5 * param_loss)
@@ -1389,32 +1412,27 @@ def main(argv):
                 # ==========================================
                 # 第六步：取得下一幀狀態，並打包成訓練用的 Transition
                 # ==========================================
+                # 將這一幀的狀態打包
                 next_time_loop = int(next_obs.observation.game_loop[0])
                 next_state = get_state_vector(
-                    next_obs,
-                    p_id, # ✨ 確保 next_state 看到的是最新決定的 p_id
-                    18,
-                    a_id,
-                    current_action_success,
-                    next_time_loop
-                )
+                    next_obs, p_id, 18, a_id, current_action_success, next_time_loop)
 
-                current_transition = (state, action_index, p_id - 1, scaled_reward, next_state, done, hidden_state, next_hidden_state, next_allowed_indices)
+                # ✨ 核心修復 1：在包裹中多塞一個 current_action_success 當作第 10 個參數
+                current_transition = (state, action_index, p_id - 1, scaled_reward, next_state, done, hidden_state, next_hidden_state, next_allowed_indices, current_action_success)
                 
-                # ✨ 核心修復：只有「成功」的動作，才允許放入 N-Step 緩衝區累積未來獎勵！
+                # 依然維持只有成功的動作才放入 N-Step 緩衝
                 if current_action_success == 1.0:
                     n_step_buffer.append(current_transition)
                 else:
-                    # ❌ 如果動作失敗撞牆，立刻將這「單獨一步」的失敗經驗存入最終記憶，絕不與未來的成功混為一談！
-                    # 這裡將 gamma 設為 0，代表失敗的動作沒有任何未來價值
-                    failed_transition = (state, action_index, p_id - 1, scaled_reward, next_state, done, hidden_state, next_hidden_state, 0.0, next_allowed_indices)
+                    failed_transition = (state, action_index, p_id - 1, scaled_reward, next_state, done, hidden_state, next_hidden_state, 0.0, next_allowed_indices, current_action_success)
                     episode_memory.append(failed_transition)
+                    # (下方清空 n_step_buffer 的邏輯維持不變... 但打包 n_transition 時要記得補上這個欄位！)
                     
                     # 並且清空當前的緩衝區，因為這條「順暢的連續技」已經被失敗打斷了！
                     # 如果不清空，前面成功的步驟就會誤以為這個失敗是它造成的
                     while len(n_step_buffer) > 0:
-                        actual_n = len(n_step_buffer)
-                        n_reward = sum([n_step_buffer[i][3] * (GAMMA ** i) for i in range(actual_n)])
+                        fail_n = len(n_step_buffer)
+                        n_reward = sum([n_step_buffer[i][3] * (GAMMA ** i) for i in range(fail_n)])
                         n_state = n_step_buffer[0][0]
                         n_action = n_step_buffer[0][1]
                         n_p_id = n_step_buffer[0][2]          
@@ -1422,9 +1440,13 @@ def main(argv):
                         n_done = n_step_buffer[-1][5]
                         n_hidden_in = (n_step_buffer[0][6][0].cpu(), n_step_buffer[0][6][1].cpu())
                         n_hidden_out = (n_step_buffer[-1][7][0].cpu(), n_step_buffer[-1][7][1].cpu())
+                        # ... 前面維持不變
                         n_next_allowed = n_step_buffer[-1][8]
+                        n_success_flag = n_step_buffer[0][9] # ✨ 拿出這一步當時到底有沒有成功
                         
-                        n_transition = (n_state, n_action, n_p_id, n_reward, n_next_state, n_done, n_hidden_in, n_hidden_out, GAMMA ** actual_n, n_next_allowed)
+                        # ✨ 核心修復 2：把 n_success_flag 放進包裹的最後面
+                        n_transition = (n_state, n_action, n_p_id, n_reward, n_next_state, n_done, n_hidden_in, n_hidden_out, GAMMA ** fail_n, n_next_allowed, n_success_flag)
+                        
                         episode_memory.append(n_transition)
                         n_step_buffer.popleft()
 
@@ -1458,35 +1480,36 @@ def main(argv):
                     # 👉 修正：hidden_state 現在在 6 跟 7
                     n_hidden_in = (n_step_buffer[0][6][0].cpu(), n_step_buffer[0][6][1].cpu())
                     n_hidden_out = (n_step_buffer[-1][7][0].cpu(), n_step_buffer[-1][7][1].cpu())
-                    n_next_allowed = n_step_buffer[-1][8] # 👉 修正：到了 8
-
-                    # ✨ 修正 2：打包成新的包裹時，把 n_p_id 放進第三個位置 (index 2)
-                    n_transition = (n_state, n_action, n_p_id, n_reward, n_next_state, n_done, n_hidden_in, n_hidden_out, GAMMA ** N_STEP, n_next_allowed)
+                    # ... 前面維持不變
+                    n_next_allowed = n_step_buffer[-1][8]
+                    n_success_flag = n_step_buffer[0][9] # ✨ 拿出這一步當時到底有沒有成功
+                    
+                    # ✨ 核心修復 2：把 n_success_flag 放進包裹的最後面
+                    n_transition = (n_state, n_action, n_p_id, n_reward, n_next_state, n_done, n_hidden_in, n_hidden_out, GAMMA ** N_STEP, n_next_allowed, n_success_flag)
                     
                     episode_memory.append(n_transition)
                     n_step_buffer.popleft()
 
                 # 3. 遊戲結束時，強制清空並結算緩衝區裡剩下的尾巴
                 # 3. 遊戲結束時，強制清空並結算緩衝區裡剩下的尾巴
+                # 3. 遊戲結束時，強制清空並結算緩衝區裡剩下的尾巴
                 if done:
                     while len(n_step_buffer) > 0:
-                        actual_n = len(n_step_buffer)
-                        # 👉 同樣把 [2] 改成 [3]
-                        n_reward = sum([n_step_buffer[i][3] * (GAMMA ** i) for i in range(actual_n)])
+                        end_n = len(n_step_buffer)  # ✅ 統一叫 end_n
+                        n_reward = sum([n_step_buffer[i][3] * (GAMMA ** i) for i in range(end_n)]) # ✅ 這裡也是 end_n
                         
                         n_state = n_step_buffer[0][0]
                         n_action = n_step_buffer[0][1]
-                        n_p_id = n_step_buffer[0][2]          # ✨ 新增
-                        n_next_state = n_step_buffer[-1][4]   # 👉 修正
+                        n_p_id = n_step_buffer[0][2]          
+                        n_next_state = n_step_buffer[-1][4]   
                         n_done = n_step_buffer[-1][5]
                         
                         n_hidden_in = (n_step_buffer[0][6][0].cpu(), n_step_buffer[0][6][1].cpu())
                         n_hidden_out = (n_step_buffer[-1][7][0].cpu(), n_step_buffer[-1][7][1].cpu())
                         n_next_allowed = n_step_buffer[-1][8]
+                        n_success_flag = n_step_buffer[0][9] 
                         
-                        # ✨ 同步把 n_p_id 放進來
-                        n_transition = (n_state, n_action, n_p_id, n_reward, n_next_state, n_done, n_hidden_in, n_hidden_out, GAMMA ** actual_n, n_next_allowed)
-                        
+                        n_transition = (n_state, n_action, n_p_id, n_reward, n_next_state, n_done, n_hidden_in, n_hidden_out, GAMMA ** end_n, n_next_allowed, n_success_flag)
                         episode_memory.append(n_transition)
                         n_step_buffer.popleft()
                

@@ -15,14 +15,32 @@ import copy
 import math
 import pygame
 
-import os
-os.environ["SC2PATH"] = r"D:\StarCraft II"
 # 匯入底層腳本
 # --- train_dqn_on_top.py 的最上方 ---
 import production_ai
 from production_ai import ProductionAI
 import logging
 from absl import logging as absl_logging
+
+# 1. 嘗試讀取系統環境變數 SC2PATH
+sc2_path = os.environ.get("SC2PATH")
+
+# 2. 如果系統裡沒設定，提供幾個常見的預設路徑讓它自己去試
+if not sc2_path:
+    common_paths = [
+        r"C:\Program Files (x86)\StarCraft II",
+        r"D:\StarCraft II",
+        r"E:\StarCraft II",
+        "/Applications/StarCraft II" # Mac 預設路徑
+    ]
+    for path in common_paths:
+        if os.path.exists(path):
+            sc2_path = path
+            os.environ["SC2PATH"] = path
+            break
+
+if not sc2_path:
+    print("⚠️ 警告：找不到 StarCraft II 安裝路徑！請設定環境變數 SC2PATH。")
 
 # 屏蔽 features.py 產出的警告訊息
 absl_logging.set_verbosity(absl_logging.ERROR)
@@ -218,7 +236,7 @@ def main(argv):
 
     RENDER_UI = True # 總開關
     pygame.init()
-    screen = pygame.display.set_mode((1200, 700))
+    screen = pygame.display.set_mode((1600, 900))
     pygame.display.set_caption("DRQN 決策中樞 - 中文化遮罩版")
     
     # 菁英記憶：改成 List，用來做排行榜
@@ -262,171 +280,628 @@ def main(argv):
         target_model.load_state_dict(brain_model.state_dict())
         print("✅ 載入成功！接續之前的記憶繼續訓練...")
 
-    epsilon = 1.00; epsilon_decay = 0.995; gamma = 0.998
+    epsilon = 0.30; epsilon_decay = 0.995; gamma = 0.998
 
     def draw_dual_head_network(surface, model, state_vector, allowed_indices, hidden_state=None):
         import numpy as np
         import torch
         import pygame
 
-        # ==========================================
-        # ✨ 畫質革命：SSAA 超採樣反鋸齒設定
-        # ==========================================
-        SCALE = 2  
+        SCALE = 1.4   # ⭐ 不要用2，會卡
         sw, sh = surface.get_size()
-        hq_surface = pygame.Surface((sw * SCALE, sh * SCALE))
-        
-        # 🎨 1. 賽博龐克背景色：極深的深藍/黑色
-        hq_surface.fill((10, 12, 18)) 
-        
-        # 嘗試載入支援中文的字體
-        font_candidates = ['microsoftjhenghei', 'microsoftyahei', 'simhei', 'msgothic', 'arialunicode']
-        font = None
-        for f_name in font_candidates:
-            try:
-                test_font = pygame.font.SysFont(f_name, 13 * SCALE, bold=True)
-                font = test_font
-                break
-            except:
-                continue
-        if font is None:
-            font = pygame.font.SysFont("arial", 13 * SCALE)
-        num_font = pygame.font.SysFont("arial", 10 * SCALE, bold=True) # 數字加粗更醒目
+        hq_surface = pygame.Surface((int(sw * SCALE), int(sh * SCALE)))
 
-        # 🏷️ 變數名稱標準化
-        input_labels = [
-            "工兵總數 (22)", "閒置工兵 (10)", "晶礦比例 (400)", "瓦斯比例 (200)", 
-            "資源差距 (M-V)", "目前人口 (200)", "剩餘人口 (20)", "補給站數 (3)", 
-            "瓦斯廠數 (2)", "軍營數量 (2)", "科技室數 (1)", "選中工兵 (0/1)", 
-            "選中主堡 (0/1)", "選中兵營 (0/1)", "陸戰隊數 (50)", "掠奪者數 (5)", 
-            "上一動作成功", "上一動作ID(50)", "上一次區塊(64)", "時間進度 (13k)" 
-        ]
-        
+        hq_surface.fill((10, 12, 18))
+
+        font = pygame.font.SysFont("microsoftjhenghei", int(12 * SCALE))
+        num_font = pygame.font.SysFont("arial", int(10 * SCALE), bold=True)
+
+        # ===== 自動維度 =====
+        STATE_DIM = len(state_vector)
+
+        input_labels = [f"特徵{i}" for i in range(STATE_DIM)]
+
         action_labels = [
-            "蓋補給站", "蓋兵營", "蓋瓦斯廠", "製造工兵", "造陸戰隊", 
-            "造掠奪者", "兵營升級", "閒置採礦", "指派瓦斯", "發呆休息", "主堡編隊"
+            "蓋補給站","蓋兵營","蓋瓦斯","造工兵","造陸戰隊",
+            "造掠奪者","升級","採礦","採氣","待機","編隊"
         ]
 
-        # 2. 獲取當前決策狀態
+        # ===== 推論 =====
         device = next(model.parameters()).device
-        model.eval()
         with torch.no_grad():
-            state_t = torch.FloatTensor(np.array(state_vector)).unsqueeze(0).to(device)
+            s = torch.FloatTensor(np.array(state_vector)).unsqueeze(0).to(device)
             if hidden_state is None:
-                hidden_state = (torch.zeros(1, 1, 128).to(device), torch.zeros(1, 1, 128).to(device))
-            
-            q_actions, _, _ = model(state_t, hidden_state)
-            q_vals = q_actions.cpu().numpy()[0]
-            best_action_idx = int(np.argmax(q_vals))
+                hidden_state = (torch.zeros(1,1,128).to(device), torch.zeros(1,1,128).to(device))
+            q,_,_ = model(s, hidden_state)
+            q_vals = q.cpu().numpy()[0]
+            best = int(np.argmax(q_vals))
 
-        # ==========================================
-        # 3. 座標佈局 (維持寬螢幕比例不變)
-        # ==========================================
-        in_pos = [(150 * SCALE, (y * 30 + 50) * SCALE) for y in range(20)]    
-        fc1_pos = [(400 * SCALE, (y * 40 + 100) * SCALE) for y in range(12)]  
-        lstm_pos = [(750 * SCALE, (y * 40 + 100) * SCALE) for y in range(12)] 
-        act_pos = [(1050 * SCALE, (y * 45 + 100) * SCALE) for y in range(11)] 
+        # ===== 自動排版（重點）=====
+        layer_x = np.linspace(80*SCALE, sw*SCALE-80*SCALE, 4)
+
+        in_pos   = [(layer_x[0], (i/(STATE_DIM-1+1e-5)*sh*SCALE*0.8 + 50*SCALE)) for i in range(STATE_DIM)]
+        fc1_pos  = [(layer_x[1], (i/11*sh*SCALE*0.8 + 50*SCALE)) for i in range(12)]
+        lstm_pos = [(layer_x[2], (i/11*sh*SCALE*0.8 + 50*SCALE)) for i in range(12)]
+        act_pos  = [(layer_x[3], (i/10*sh*SCALE*0.8 + 50*SCALE)) for i in range(11)]
 
         fc1_w = model.fc1.weight.data.cpu().numpy()
         lstm_w = model.lstm.weight_ih_l0.data.cpu().numpy()[:128, :]
         act_w = model.fc_action.weight.data.cpu().numpy()
 
-        # ==========================================
-        # 5. 繪製連線 (🎨 霓虹螢光配色)
-        # ==========================================
-        
-        # A. 輸入層 -> FC1 特徵層 
-        for h_idx in range(12): 
-            actual_h = h_idx * 10
-            weights = fc1_w[actual_h, :]
-            top_2_inputs = np.argsort(np.abs(weights))[-2:]
-            
-            for i in range(20):
-                w = weights[i]
-                if i in top_2_inputs and abs(w) > 0.1:
-                    # 正權重：霓虹青 (Cyan) / 負權重：賽博粉 (Magenta)
-                    color = (0, 200, 255) if w > 0 else (255, 50, 150)
-                    active_multiplier = 2.0 if state_vector[i] > 0.1 else 0.5
-                    width = max(1, int(abs(w) * 4 * active_multiplier)) * SCALE
-                    pygame.draw.line(hq_surface, color, in_pos[i], fc1_pos[h_idx], width)
+        # ===== 畫線 =====
+        for h in range(12):
+            w = fc1_w[h*10]
+            top = np.argsort(np.abs(w))[-2:]
+            for i in range(STATE_DIM):
+                if i in top:
+                    col = (0,200,255) if w[i]>0 else (255,50,150)
+                    pygame.draw.line(hq_surface, col, in_pos[i], fc1_pos[h], 2)
 
-        # B. FC1 特徵層 -> LSTM 記憶層 
-        for j in range(12): 
-            actual_j = j * 10
-            for i in range(12): 
-                actual_i = i * 10
-                w = lstm_w[actual_j, actual_i]
-                abs_w = abs(w)
-                
-                if abs_w > 0.05: 
-                    if w > 0:
-                        # 高權重：亮青色 / 低權重：暗藍綠色
-                        color = (0, 200, 255) if abs_w > 0.15 else (0, 80, 120)
-                    else:
-                        # 高權重：亮粉紅 / 低權重：暗紫紅色
-                        color = (255, 50, 150) if abs_w > 0.15 else (120, 20, 70)
-                    
-                    width = max(1, int(abs_w * 15)) * SCALE
-                    pygame.draw.line(hq_surface, color, fc1_pos[i], lstm_pos[j], width)
+        for j in range(12):
+            for i in range(12):
+                w = lstm_w[j*10][i*10]
+                if abs(w)>0.05:
+                    col = (0,200,255) if w>0 else (255,50,150)
+                    pygame.draw.line(hq_surface, col, fc1_pos[i], lstm_pos[j], 1)
 
-        # C. LSTM 記憶層 -> 動作層 
-        for a_idx in range(11):
-            if a_idx not in allowed_indices: continue
-            
-            weights = act_w[a_idx, :]
-            sampled_weights = [weights[h * 10] for h in range(12)]
-            top_2_hidden = np.argsort(np.abs(sampled_weights))[-2:]
+        for a in range(11):
+            if a not in allowed_indices: continue
+            w = act_w[a]
+            top = np.argsort(np.abs([w[i*10] for i in range(12)]))[-2:]
+            for i in range(12):
+                if i in top:
+                    col = (0,200,255) if w[i*10]>0 else (255,50,150)
+                    width = 3 if a==best else 1
+                    pygame.draw.line(hq_surface, col, lstm_pos[i], act_pos[a], width)
 
-            for h_idx in range(12):
-                actual_h = h_idx * 10
-                w = act_w[a_idx, actual_h]
-                if h_idx in top_2_hidden and abs(w) > 0.1:
-                    color = (0, 200, 255) if w > 0 else (255, 50, 150)
-                    is_active_path = (a_idx == best_action_idx)
-                    width = max(1, int(abs(w) * (6 if is_active_path else 2))) * SCALE
-                    pygame.draw.line(hq_surface, color, lstm_pos[h_idx], act_pos[a_idx], width)
-
-        # ==========================================
-        # 🎨 6. 節點渲染 (全息科技風格)
-        # ==========================================
-        def draw_neat_node(pos, label, num, side="left", active_val=0, is_best=False, is_masked=False):
-            if is_masked:
-                # 被遮罩：極暗灰
-                fill_color, border_color, text_color = (20, 20, 20), (50, 50, 50), (100, 100, 100)
-            elif is_best:
-                # 最終決策：亮青色發光
-                fill_color, border_color, text_color = (0, 80, 150), (0, 255, 255), (255, 255, 255)
-            elif active_val > 0.1:
-                # 活躍輸入：亮綠色發光
-                fill_color, border_color, text_color = (0, 100, 50), (0, 255, 100), (255, 255, 255)
+        # ===== 畫節點 =====
+        def node(pos, txt, active=False, best=False, masked=False):
+            if masked:
+                fill=(30,30,30); border=(70,70,70)
+            elif best:
+                fill=(0,120,200); border=(0,255,255)
+            elif active:
+                fill=(0,100,50); border=(0,255,100)
             else:
-                # 一般未啟動狀態：深底色搭配暗藍邊框
-                fill_color, border_color, text_color = (15, 20, 25), (40, 80, 120), (200, 200, 200)
+                fill=(15,20,25); border=(50,100,150)
 
-            radius = 13 * SCALE
-            pygame.draw.circle(hq_surface, fill_color, pos, radius)
-            pygame.draw.circle(hq_surface, border_color, pos, radius, 2 * SCALE)
+            pygame.draw.circle(hq_surface, fill, pos, int(10*SCALE))
+            pygame.draw.circle(hq_surface, border, pos, int(10*SCALE), 2)
+
+            t = num_font.render(str(txt), True, (255,255,255))
+            hq_surface.blit(t, (pos[0]-t.get_width()//2, pos[1]-t.get_height()//2))
+
+        for i,p in enumerate(in_pos): node(p,i, state_vector[i]>0.1)
+        for i,p in enumerate(fc1_pos): node(p,i)
+        for i,p in enumerate(lstm_pos): node(p,i)
+        for i,p in enumerate(act_pos):
+            node(p,i, best=(i==best and i in allowed_indices), masked=(i not in allowed_indices))
+
+        final = pygame.transform.smoothscale(hq_surface,(sw,sh))
+        surface.blit(final,(0,0))
             
-            n_txt = num_font.render(str(num), True, text_color)
-            hq_surface.blit(n_txt, (pos[0]-n_txt.get_width()//2, pos[1]-n_txt.get_height()//2))
+    # =========================================================
+    # HUD Dashboard：不用嵌 SC2 視窗，左上用 feature_screen 畫戰場
+    # =========================================================
+
+    ACTION_NAMES = {
+        1: "Build Depot",
+        2: "Build Barracks",
+        11: "Build Refinery",
+        14: "Train SCV",
+        16: "Train Marine",
+        18: "Train Marauder",
+        34: "Build TechLab",
+        41: "Gather Minerals",
+        42: "Assign Gas",
+        44: "Idle",
+        45: "Bind CC"
+    }
+
+    HUD_HISTORY = {
+        "minerals": deque(maxlen=120),
+        "vespene": deque(maxlen=120),
+    }
+
+    def ui_colors():
+        return {
+            "bg": (6, 18, 24),
+            "panel": (8, 26, 34),
+            "panel2": (12, 34, 44),
+            "border": (70, 220, 210),
+            "title": (150, 255, 235),
+            "text": (190, 255, 245),
+            "good": (120, 255, 130),
+            "warn": (255, 205, 90),
+            "bad": (255, 100, 100),
+            "cyan": (80, 220, 255),
+            "gray": (85, 105, 115),
+            "darkgray": (45, 55, 60),
+        }
+
+    def get_fonts():
+        return {
+            "title": pygame.font.SysFont("microsoftjhenghei", 22, bold=True),
+            "header": pygame.font.SysFont("microsoftjhenghei", 18, bold=True),
+            "text": pygame.font.SysFont("microsoftjhenghei", 16),
+            "small": pygame.font.SysFont("microsoftjhenghei", 14),
+            "timer": pygame.font.SysFont("consolas", 42, bold=True),
+        }
+
+    def draw_glow_rect(surface, rect, fill, border, border_width=2):
+        pygame.draw.rect(surface, fill, rect, border_radius=8)
+        pygame.draw.rect(surface, border, rect, border_width, border_radius=8)
+
+    def draw_panel(surface, rect, title, fonts, colors):
+        draw_glow_rect(surface, rect, colors["panel"], colors["border"], 2)
+        txt = fonts["title"].render(title, True, colors["title"])
+        surface.blit(txt, (rect[0] + 12, rect[1] + 10))
+
+    def count_units_from_screen(obs, unit_id, pixels_per_unit=1.0):
+        unit_type = obs.observation.feature_screen.unit_type
+        player_rel = obs.observation.feature_screen.player_relative
+        pixels = np.sum((unit_type == unit_id) & (player_rel == 1))
+        if pixels_per_unit <= 1:
+            return int(pixels)
+        return int(np.round(float(pixels) / float(pixels_per_unit)))
+
+    def get_dashboard_snapshot(obs):
+        player = obs.observation.player
+        current_loop = int(obs.observation.game_loop[0])
+
+        return {
+            "minerals": int(player.minerals),
+            "vespene": int(player.vespene),
+            "workers": int(player.food_workers),
+            "food_used": int(player.food_used),
+            "food_cap": int(player.food_cap),
+            "idle_workers": int(player.idle_worker_count),
+            "depots": count_units_from_screen(obs, 19, 69.0),
+            "refineries": count_units_from_screen(obs, 20, 97.0),
+            "barracks": count_units_from_screen(obs, 21, 137.0),
+            "techlabs": count_units_from_screen(obs, 37, 85.0),
+            "marines": count_units_from_screen(obs, 48, 10.0),
+            "marauders": count_units_from_screen(obs, 51, 10.0),
+            "loop": current_loop,
+            "remain_loop": max(0, 13440 - current_loop),
+        }
+
+    def format_loop_to_mmss(loop_value):
+        total_seconds = int((loop_value / 13440.0) * 600)
+        return f"{total_seconds // 60:02d}:{total_seconds % 60:02d}"
+
+    def draw_feature_game_panel(surface, rect, obs, fonts, colors):
+        draw_panel(surface, rect, "AGENT CONTROL - Feature Screen", fonts, colors)
+
+        x, y, w, h = rect
+        inner = pygame.Rect(x + 12, y + 45, w - 24, h - 57)
+        pygame.draw.rect(surface, (15, 30, 38), inner, border_radius=6)
+
+        unit_type = obs.observation.feature_screen.unit_type
+        player_rel = obs.observation.feature_screen.player_relative
+
+        sh, sw = unit_type.shape
+        sx = inner.width / float(sw)
+        sy = inner.height / float(sh)
+
+        # 礦
+        mineral_pts = np.argwhere(unit_type == 341)
+        step = max(1, len(mineral_pts) // 120 + 1)
+        for yy, xx in mineral_pts[::step]:
+            px = int(inner.x + xx * sx)
+            py = int(inner.y + yy * sy)
+            pygame.draw.circle(surface, (70, 140, 255), (px, py), 3)
+
+        # 我方
+        own_pts = np.argwhere(player_rel == 1)
+        step = max(1, len(own_pts) // 250 + 1)
+        for yy, xx in own_pts[::step]:
+            px = int(inner.x + xx * sx)
+            py = int(inner.y + yy * sy)
+            pygame.draw.circle(surface, colors["good"], (px, py), 3)
+
+        # 敵方
+        enemy_pts = np.argwhere(player_rel == 4)
+        step = max(1, len(enemy_pts) // 150 + 1)
+        for yy, xx in enemy_pts[::step]:
+            px = int(inner.x + xx * sx)
+            py = int(inner.y + yy * sy)
+            pygame.draw.circle(surface, colors["bad"], (px, py), 3)
+
+    def q_values_to_confidence(q_values, allowed_indices):
+        q = np.array(q_values, dtype=np.float32)
+        masked = np.full_like(q, -1e9)
+
+        for idx in allowed_indices:
+            if 0 <= idx < len(q):
+                masked[idx] = q[idx]
+
+        exp_q = np.exp(masked - np.max(masked))
+        return exp_q / max(np.sum(exp_q), 1e-6)
+
+    def draw_bar(surface, x, y, w, h, value, fg, bg):
+        pygame.draw.rect(surface, bg, (x, y, w, h), border_radius=4)
+        fill_w = int(max(0, min(1, value)) * w)
+        pygame.draw.rect(surface, fg, (x, y, fill_w, h), border_radius=4)
+
+    def draw_action_table(surface, rect, q_values, allowed_indices, valid_actions, fonts, colors):
+        draw_panel(surface, rect, "Current Action Intent & Masks", fonts, colors)
+
+        x, y, w, h = rect
+        conf = q_values_to_confidence(q_values, allowed_indices)
+        best_idx = int(np.argmax(q_values)) if len(q_values) > 0 else -1
+
+        surface.blit(fonts["header"].render("Action", True, colors["text"]), (x + 15, y + 50))
+        surface.blit(fonts["header"].render("Confidence", True, colors["text"]), (x + 210, y + 50))
+        surface.blit(fonts["header"].render("Mask", True, colors["text"]), (x + 360, y + 50))
+
+        row_y = y + 82
+        for i, act_id in enumerate(valid_actions):
+            yy = row_y + i * 28
+            is_open = i in allowed_indices
+            is_best = i == best_idx and is_open
+
+            color = colors["warn"] if is_best else (colors["good"] if is_open else colors["gray"])
+            name = ACTION_NAMES.get(act_id, f"Action {act_id}")
+
+            if is_best:
+                pygame.draw.rect(surface, (28, 50, 60), (x + 8, yy - 2, w - 16, 24), border_radius=4)
+
+            surface.blit(fonts["text"].render(name, True, color), (x + 15, yy))
+            draw_bar(surface, x + 210, yy + 5, 120, 14, float(conf[i]), colors["good"], (20, 40, 46))
+            surface.blit(fonts["small"].render(f"{int(conf[i] * 100)}%", True, color), (x + 335, yy))
+            surface.blit(fonts["text"].render("OPEN" if is_open else "LOCK", True, color), (x + 380, yy))
+
+    def draw_resource_panel(surface, rect, obs, fonts, colors):
+        draw_panel(surface, rect, "Current Resources", fonts, colors)
+        x, y, w, h = rect
+        s = get_dashboard_snapshot(obs)
+
+        items = [
+            ("Minerals", s["minerals"], colors["cyan"]),
+            ("Vespene", s["vespene"], colors["good"]),
+            ("SCV", s["workers"], colors["text"]),
+            ("Supply", f'{s["food_used"]}/{s["food_cap"]}', colors["warn"]),
+            ("Barracks", s["barracks"], colors["text"]),
+            ("TechLab", s["techlabs"], colors["text"]),
+            ("Marauders", s["marauders"], colors["good"]),
+        ]
+
+        for i, (label, value, color) in enumerate(items):
+            yy = y + 45 + i * 25
+            surface.blit(fonts["text"].render(label, True, colors["text"]), (x + 15, yy))
+            txt = fonts["text"].render(str(value), True, color)
+            surface.blit(txt, (x + w - 20 - txt.get_width(), yy))
+
+    def draw_timer_panel(surface, rect, obs, fonts, colors):
+        draw_panel(surface, rect, "Mission Timer", fonts, colors)
+        x, y, w, h = rect
+        s = get_dashboard_snapshot(obs)
+
+        surface.blit(fonts["timer"].render(format_loop_to_mmss(s["remain_loop"]), True, colors["cyan"]), (x + 20, y + 50))
+
+        status = f'{s["marauders"]}/5 Marauders Target'
+        surface.blit(fonts["header"].render(status, True, colors["good"]), (x + 20, y + 110))
+
+    def draw_timeline(surface, rect, obs, fonts, colors):
+        draw_panel(surface, rect, "Production Milestone Timeline", fonts, colors)
+        x, y, w, h = rect
+        s = get_dashboard_snapshot(obs)
+
+        milestones = [
+            ("Start", True),
+            ("Depot", s["depots"] >= 1),
+            ("Barracks", s["barracks"] >= 1),
+            ("Refinery", s["refineries"] >= 1),
+            ("TechLab", s["techlabs"] >= 1),
+            ("Target(5)", s["marauders"] >= 5),
+        ]
+
+        line_y = y + 70
+        start_x = x + 35
+        end_x = x + w - 35
+        pygame.draw.line(surface, colors["gray"], (start_x, line_y), (end_x, line_y), 3)
+
+        for i, (label, done) in enumerate(milestones):
+            px = start_x + int(i / (len(milestones) - 1) * (end_x - start_x))
+            c = colors["good"] if done else colors["darkgray"]
+            pygame.draw.circle(surface, c, (px, line_y), 9)
+            pygame.draw.circle(surface, colors["border"], (px, line_y), 9, 2)
+            txt = fonts["small"].render(label, True, c)
+            surface.blit(txt, (px - txt.get_width() // 2, line_y + 18))
+        progress = min(1.0, s["loop"] / 13440)
+
+        bar_x = rect[0] + 30
+        bar_y = rect[1] + rect[3] - 22
+        bar_w = rect[2] - 60
+        bar_h = 10
+
+        pygame.draw.rect(surface, (40, 60, 70), (bar_x, bar_y, bar_w, bar_h), border_radius=5)
+        pygame.draw.rect(surface, colors["cyan"], (bar_x, bar_y, int(bar_w * progress), bar_h), border_radius=5)    
+
+
+
+
+    def draw_sparkline(surface, rect, values, color, fonts, colors, title):
+        draw_glow_rect(surface, rect, colors["panel2"], colors["border"], 1)
+        x, y, w, h = rect
+
+        surface.blit(
+            fonts["small"].render(title, True, colors["title"]),
+            (x + 8, y + 6)
+        )
+
+        if len(values) < 2:
+            return
+
+        arr = np.array(values, dtype=np.float32)
+        mn, mx = float(np.min(arr)), float(np.max(arr))
+
+        if abs(mx - mn) < 1e-6:
+            mx = mn + 1
+
+        pts = []
+        for i, v in enumerate(arr):
+            px = x + 8 + int(i / max(1, len(arr) - 1) * (w - 16))
+            py = y + h - 8 - int((v - mn) / (mx - mn) * (h - 35))
+            pts.append((px, py))
+
+        pygame.draw.lines(surface, color, False, pts, 2)
+
+        latest = fonts["small"].render(str(int(arr[-1])), True, color)
+        surface.blit(latest, (x + w - latest.get_width() - 8, y + 6))
+
+    def draw_small_info(surface, rect, title, value, fonts, colors, history_values=None, line_color=None):
+        draw_panel(surface, rect, title, fonts, colors)
+
+        # 標題
+        
+
+        # 數字
+        val_txt = fonts["header"].render(str(value), True, colors["text"])
+        surface.blit(val_txt, (rect[0] + 12, rect[1] + 30))
+
+        # 小折線圖
+        if history_values is not None and len(history_values) >= 2:
+            arr = np.array(history_values, dtype=np.float32)
+            mn, mx = float(np.min(arr)), float(np.max(arr))
+            if abs(mx - mn) < 1e-6:
+                mx = mn + 1
+
+            graph_x = rect[0] + int(rect[2] * 0.48)
+            graph_y = rect[1] + 22
+            graph_w = int(rect[2] * 0.46)
+            graph_h = rect[3] - 30
+
+            pts = []
+            for i, v in enumerate(arr):
+                px = graph_x + int(i / max(1, len(arr) - 1) * graph_w)
+                py = graph_y + graph_h - int((v - mn) / (mx - mn) * graph_h)
+                pts.append((px, py))
+
+            pygame.draw.lines(surface, line_color or colors["cyan"], False, pts, 2)
+
+    def draw_current(surface, rect, q_values, allowed_indices, valid_actions, fonts, colors):
+        draw_panel(surface, rect, "Current Action Intent & Masks", fonts, colors)
+
+        x, y, w, h = rect
+        conf = q_values_to_confidence(q_values, allowed_indices)
+
+        # 欄位位置
+        col_action = x + 18
+        col_conf   = x + 210
+        col_mask   = x + 380
+        col_tech   = x + 500
+
+        header_y = y + 30
+        row_y = y + 65
+        row_h = 28
+
+        # 表頭
+        surface.blit(fonts["header"].render("Action", True, colors["text"]), (col_action, header_y))
+        surface.blit(fonts["header"].render("Confidence", True, colors["text"]), (col_conf, header_y))
+        surface.blit(fonts["header"].render("Mask Status", True, colors["text"]), (col_mask, header_y))
+        surface.blit(fonts["header"].render("Tech-Tree", True, colors["text"]), (col_tech, header_y))
+
+        # 只顯示前 5 個最高信心動作
+        order = np.argsort(conf)[::-1][:8]
+
+        for rank, i in enumerate(order):
+            act_id = valid_actions[i]
+            name = ACTION_NAMES.get(act_id, f"Action {act_id}")
+
+            is_open = i in allowed_indices
+            pct = int(conf[i] * 100)
+
+            yy = row_y + rank * row_h
+
+            # 交錯底色
+            bg = (16, 42, 48) if rank % 2 == 0 else (20, 50, 56)
+            pygame.draw.rect(surface, bg, (x + 10, yy - 4, w - 20, row_h))
+
+            text_color = colors["good"] if is_open else colors["gray"]
+
+            # Action
+            surface.blit(fonts["text"].render(name, True, text_color), (col_action, yy))
+
+            # Confidence bar
+            bar_x = col_conf
+            bar_y = yy + 4
+            bar_w = 120
+            bar_h = 14
+
+            pygame.draw.rect(surface, (10, 28, 32), (bar_x, bar_y, bar_w, bar_h))
+            pygame.draw.rect(surface, colors["good"], (bar_x, bar_y, int(bar_w * pct / 100), bar_h))
+
+            pct_txt = fonts["small"].render(f"{pct}%", True, text_color)
+            surface.blit(pct_txt, (bar_x + bar_w + 8, yy))
+
+            # Mask Status
+            mask_text = "OPEN" if is_open else "LOCK"
+            mask_color = colors["good"] if is_open else colors["bad"]
+            surface.blit(fonts["small"].render(mask_text, True, mask_color), (col_mask, yy))
+
+            # Tech Tree
+            tech_text = "OK" if is_open else "BLOCK"
+            tech_color = colors["good"] if is_open else colors["bad"]
+            surface.blit(fonts["small"].render(tech_text, True, tech_color), (col_tech, yy))
+
+    def draw_full_hud(surface, obs, brain_model, state_vector, allowed_indices, hidden_state, valid_actions):
+        colors = ui_colors()
+        fonts = get_fonts()
+        surface.fill(colors["bg"])
+
+        s = get_dashboard_snapshot(obs)
+        HUD_HISTORY["minerals"].append(s["minerals"])
+        HUD_HISTORY["vespene"].append(s["vespene"])
+
+        device = next(brain_model.parameters()).device
+        with torch.no_grad():
+            st = torch.FloatTensor(np.array(state_vector)).unsqueeze(0).to(device)
+            q_actions, _, _ = brain_model(st, hidden_state)
+            q_values = q_actions.cpu().numpy()[0]
+
+        LEFT = 20
+        TOP = 20
+        GAP = 10
+
+        LEFT_W = 880
+        RIGHT_W = 620
+        TOP_H = 480
+
+        # ===== 上排 =====
+        game_rect = (LEFT, TOP, LEFT_W, TOP_H)
+        network_rect = (LEFT + LEFT_W + GAP, TOP, RIGHT_W, TOP_H)
+
+        # ===== 中排 =====
+        mid_y = TOP + TOP_H + GAP
+        mid_h = 160
+
+        # ⭐ 一定要有這行（你現在缺這個）
+        timer_w = 180
+        timer_rect = (LEFT, mid_y, timer_w, mid_h)
+
+        # 小資訊
+        info_w = (LEFT_W - timer_w - GAP*2) // 2
+        info_h = (mid_h - GAP) // 2
+
+        x1 = LEFT + timer_w + GAP
+        x2 = x1 + info_w + GAP
+
+        info1_rect = (x1, mid_y, info_w, info_h)
+        info2_rect = (x2, mid_y, info_w, info_h)
+        info3_rect = (x1, mid_y + info_h + GAP, info_w, info_h)
+        info4_rect = (x2, mid_y + info_h + GAP, info_w, info_h)
+
+        # ===== 下排 =====
+        timeline_y = mid_y + mid_h + GAP
+        timeline_h = 140
+
+        timeline_rect = (LEFT, timeline_y, LEFT_W, timeline_h)
+
+        # ===== Current =====
+        current_rect = (
+            LEFT + LEFT_W + GAP,
+            mid_y,
+            RIGHT_W,
+            timeline_y + timeline_h - mid_y
+        )    
+
+        # 1️⃣ 先畫外框
+        draw_glow_rect(surface, network_rect, colors["panel"], colors["border"], 2)
+
+        # 2️⃣ 畫標題
+        surface.blit(fonts["header"].render("DRQN Network", True, colors["title"]),
+                    (network_rect[0] + 12, network_rect[1] + 10))
+
+        # 3️⃣ 畫內容
+        sub_rect = pygame.Rect(
+            network_rect[0] + 10,
+            network_rect[1] + 40,
+            network_rect[2] - 20,
+            network_rect[3] - 50
+        )
+
+        if sub_rect.width > 0 and sub_rect.height > 0:
+            sub_surface = surface.subsurface(sub_rect)
+
+            draw_dual_head_network(
+                sub_surface,
+                brain_model,
+                state_vector,
+                allowed_indices,
+                hidden_state
+            )
+
+        # ⭐ 建立子畫面區域
+        sub_rect = pygame.Rect(
+            network_rect[0] + 10,
+            network_rect[1] + 40,
+            network_rect[2] - 20,
+            network_rect[3] - 50
+        )
+
+        if sub_rect.width > 0 and sub_rect.height > 0:
+            sub_surface = surface.subsurface(sub_rect)
+
+            # ⭐ 直接畫進 sub_surface（不用 temp_surface）
+            draw_dual_head_network(
+                sub_surface,
+                brain_model,
+                state_vector,
+                allowed_indices,
+                hidden_state
+            )
             
-            if label:
-                # 🎨 文字顏色反白，被遮罩的字變暗灰
-                l_txt = font.render(label, True, (220, 230, 240) if not is_masked else (100, 100, 100))
-                x_off = (-105 * SCALE) if side == "left" else (25 * SCALE)
-                y_off = -8 * SCALE
-                hq_surface.blit(l_txt, (pos[0] + x_off, pos[1] + y_off))
+        # 左上
+        draw_feature_game_panel(surface, game_rect, obs, fonts, colors)
+       
+        # 中間資訊
+        s = get_dashboard_snapshot(obs)
 
-        for i, pos in enumerate(in_pos): draw_neat_node(pos, input_labels[i], i, "left", state_vector[i])
-        for i, pos in enumerate(fc1_pos): draw_neat_node(pos, None, i + 100)
-        for i, pos in enumerate(lstm_pos): draw_neat_node(pos, None, i + 200)
-        for i, pos in enumerate(act_pos):
-            is_masked = (i not in allowed_indices)
-            draw_neat_node(pos, action_labels[i], i, "right", 0, is_best=(i == best_action_idx and not is_masked), is_masked=is_masked)
+        draw_panel(surface, timer_rect, "Timer", fonts, colors)
+        surface.blit(
+            fonts["header"].render(format_loop_to_mmss(s["remain_loop"]), True, colors["cyan"]),
+            (timer_rect[0] + 10, timer_rect[1] + 60)
+        )
 
-        # 🎬 平滑縮小並貼回真實螢幕
-        final_image = pygame.transform.smoothscale(hq_surface, (sw, sh))
-        surface.blit(final_image, (0, 0))
+        draw_small_info(surface, info1_rect, "Marauders", s["marauders"], fonts, colors)
+
+        # ⭐ 把 Minerals 放到 info2
+        draw_small_info(
+            surface,
+            info2_rect,
+            "Minerals",
+            s["minerals"],
+            fonts,
+            colors,
+            HUD_HISTORY["minerals"],
+            colors["cyan"]
+        )
+
+        # ⭐ 把 Supply 放到 info3
+        draw_small_info(surface, info3_rect, "Supply", f"{s['food_used']}/{s['food_cap']}", fonts, colors)
+
+        draw_small_info(
+            surface,
+            info4_rect,
+            "Gas",
+            s["vespene"],
+            fonts,
+            colors,
+            HUD_HISTORY["vespene"],
+            colors["good"]
+        )
+
+
+        # 右下決策
+        draw_current(surface, current_rect, q_values, allowed_indices, valid_actions, fonts, colors)
+
+
+        # 底部 timeline
+        draw_timeline(surface, timeline_rect, obs, fonts, colors)
+
+        pygame.display.flip()
 
     def get_action_mask(target_obs, last_act_id=0): 
         """ 根據當前畫面狀態，回傳合法的 Action 索引列表 """
@@ -455,13 +930,10 @@ def main(argv):
         #if barracks >= 2 and 2 in allowed_acts: allowed_acts.remove(2)
         #同樣道理，你幫 AI 決定了「兵營最多2個」。但也許 AI 會學到「3個兵營可以同時生產掠奪者，速度更快」，
         #你把這個可能性直接封死了。
+        allowed_acts.remove(16)
         if depots == 0 and 2 in allowed_acts: allowed_acts.remove(2)
             
-        if barracks == 0:
-            if 11 in allowed_acts: allowed_acts.remove(11)
-            # 👉 移除 44 的連帶修改
-            for act in [16, 18, 34]: 
-                if act in allowed_acts: allowed_acts.remove(act)
+        
                 
         if techlabs == 0 and 18 in allowed_acts: allowed_acts.remove(18)
         if refineries >= 1 and 11 in allowed_acts: allowed_acts.remove(11)
@@ -477,7 +949,7 @@ def main(argv):
         if supply_surplus < 1:
             for act in [14, 16]: 
                 if act in allowed_acts: allowed_acts.remove(act)
-        
+        if supply_surplus < 2 and 18 in allowed_acts: allowed_acts.remove(18)  # ← 加這行
         
         if minerals < 50:
             for act in [14, 16, 34]: 
@@ -548,18 +1020,20 @@ def main(argv):
             hidden = (h_in.to(device), c_in.to(device))
             
             for step_data in sequence:
-                # 📦 完整解包 10 個參數
+                # 📦 完整解包現在變成 11 個參數了
                 state = torch.FloatTensor([step_data[0]]).to(device)
                 action = torch.LongTensor([step_data[1]]).to(device)
                 param_target = torch.LongTensor([step_data[2]]).to(device)
                 reward = torch.FloatTensor([step_data[3]]).to(device)
                 next_state = torch.FloatTensor([step_data[4]]).to(device)
                 done = step_data[5]
-                # step_data[6] 是 hidden_in，由外部維護
                 h_out, c_out = step_data[7]
                 hidden_out = (h_out.to(device), c_out.to(device))
                 gamma_mult = step_data[8]
                 next_allowed = step_data[9]
+                
+                # ✨ 核心修復 3A：拿出真正的單步成功鐵證
+                step_success_flag = step_data[10]
 
                 # 🧠 第一大腦預測分數
                 q_actions, q_params, next_hidden = brain_model(state, hidden)
@@ -580,7 +1054,10 @@ def main(argv):
                 # ⚖️ 計算損失並更新
                 action_loss = nn.SmoothL1Loss()(q_value, target_q)
                 param_loss = torch.tensor(0.0).to(device)
-                if reward > 0:
+                
+                # ✨ 核心修復 3B：只有當「這一步的滑鼠點擊真正被引擎接受 (success == 1.0)」時，
+                # 我們才允許神經網路去記住這個 p_id！不再被未來總分 (reward) 給騙了！
+                if step_success_flag == 1.0:
                     param_loss = nn.CrossEntropyLoss()(q_params, param_target)
                 
                 total_loss += (action_loss + 0.5 * param_loss)
@@ -598,7 +1075,7 @@ def main(argv):
         players=[sc2_env.Agent(sc2_env.Race.terran),sc2_env.Bot(sc2_env.Race.terran, sc2_env.Difficulty.very_easy)], #sc2_env.Agent(sc2_env.Race.terran)
         agent_interface_format=sc2_env.AgentInterfaceFormat(
             feature_dimensions=sc2_env.Dimensions(screen=84, minimap=64), use_raw_units=False),
-        step_mul=16, realtime=False
+        step_mul=32, realtime=False
         
     ) as env:
         
@@ -655,6 +1132,7 @@ def main(argv):
 
             episode_reward = 0.0  
             final_reward = 0.0
+            failed_actions = 0
             achieved_milestones = set()
             
 
@@ -744,9 +1222,7 @@ def main(argv):
                         # ==========================================
                         a_id = VALID_ACTIONS[action_index]
                         
-                        if a_id == last_action_id and last_action_success == 0.0:
-                            # 強制換位也要改成 1~100
-                            p_id = random.randint(1, 100)
+                        
                 # ==========================================
                 # ==========================================
                 # ✨ 核心防彈機制：在一開始就先給定預設發呆動作！
@@ -756,11 +1232,8 @@ def main(argv):
                 try:
                     sc2_action = agent.get_action(obs, a_id, parameter=p_id)
                 except Exception as e:
-                    print(f"⚠️ 錯誤: {e}")
-                    sc2_action = actions.FUNCTIONS.no_op()
-                except Exception as e:
-                    # 如果腳本內部發生任何不可預期的錯誤，印出警告但不崩潰
                     print(f"⚠️ 執行動作 {a_id} 時發生錯誤: {e}，自動轉為發呆 (no_op)")
+                    sc2_action = actions.FUNCTIONS.no_op()
 
                 # 執行動作並進入下一幀
                 obs_list = env.step([sc2_action, actions.FUNCTIONS.no_op()])
@@ -769,15 +1242,24 @@ def main(argv):
 
                 # ... 在你的訓練迴圈內 ...
 
-                if RENDER_UI and train_step_counter % 2 == 0:
-                    # ✨ 核心修正：加入這兩行，讓視窗學會「聽話」
+                if RENDER_UI and train_step_counter % 5 == 0:   # ⭐ 降頻
+
                     for event in pygame.event.get():
                         if event.type == pygame.QUIT:
                             pygame.quit()
-                            return # 讓你可以手動關閉視窗結束訓練
+                            return
 
-                    # 執行原本的繪圖
-                    draw_dual_head_network(screen, brain_model, state, allowed_indices, hidden_state)
+                    draw_full_hud(
+                        screen,
+                        obs,
+                        brain_model,
+                        state,
+                        allowed_indices,
+                        hidden_state,
+                        VALID_ACTIONS
+                    )
+
+                    # 執行原本的繪圖                    
                     pygame.display.flip()
 
                 # ==========================================
@@ -809,7 +1291,7 @@ def main(argv):
                 # 計算掠奪者數量 (ID: 51，每隻約佔 10 像素)
                 u_pixels = np.sum((next_s_unit == 51) & (next_s_player == 1))
                 current_real_count = int(np.round(float(u_pixels) / 10.0))
-                
+                current_real_count = min(current_real_count, 5)
 
                 
                 actual_id = agent.locked_action if agent.locked_action is not None else a_id
@@ -841,95 +1323,81 @@ def main(argv):
             #   - 過程獎勵（里程碑）只給方向，終局獎勵才是真正的學習訊號
             # ==========================================
 
-                step_reward = 0.0  # 每一幀開始時，先將本幀獎勵歸零
-
                 # ==========================================
-                # 第一步：科技樹里程碑（追蹤用，不給分）
-                # 設計理念：
-                #   里程碑只用來追蹤建築完成度（x2），
-                #   不再給過程分數，避免 AI 刷建築分數。
-                #   achieved_milestones 的大小會在終局結算時用到。
+                # 🏆 恢復密集獎勵系統 (Dense Reward)
                 # ==========================================
-
+                # ==========================================
+                # 🏆 精確評估系統 (0.6 時間, 0.2 建築, 0.1 產量, 0.1 效率)
+                # ==========================================
+                step_reward = 0.0
+                
+                # 1. 里程碑追蹤 (不直接給分，用於終局結算)
                 if "depot" not in achieved_milestones and current_depots >= 1:
                     achieved_milestones.add("depot")
-                    print("補給站里程碑達成")
-
                 if "barracks" not in achieved_milestones and current_barracks >= 1:
                     achieved_milestones.add("barracks")
-                    print("兵營里程碑達成")
-
                 if "refinery" not in achieved_milestones and current_refineries >= 1:
                     achieved_milestones.add("refinery")
-                    print("瓦斯廠里程碑達成")
-
                 if "techlab" not in achieved_milestones and current_techlabs >= 1:
                     achieved_milestones.add("techlab")
-                    print("科技室里程碑達成")
 
-                # ==========================================
-                # 第二步：掠奪者產量追蹤（不給過程分）
-                # 設計理念：
-                #   只追蹤數量變化，實際加分在終局統一結算。
-                # ==========================================
+                # 2. 掠奪者產量追蹤 (不直接給分，用於終局結算)
                 if current_real_count > getattr(agent, 'last_target_count', 0):
-                    agent.last_target_count = current_real_count  # 更新追蹤基準
-                    #step_reward += 0.15
+                    agent.last_target_count = current_real_count
                     print(f"🎯 掠奪者產出！目前進度: {current_real_count}/5")
 
-                # ==========================================
-                # 第三步：終局判定
-                # ==========================================
+                # 3. 無效動作懲罰 (Process Penalty)
+                # 為了讓訓練穩定，過程中的錯誤還是給予微小的懲罰，促使它尋找合法座標
+                if current_action_success == 0.0:
+                    step_reward -= 0.01
+                    # 追蹤整局的失敗次數，用於終局結算
+                    failed_actions += 1
+
+                # 4. 終局判定與四大維度結算
                 current_loop = int(next_obs.observation.game_loop[0])
-                done = next_obs.last() or current_loop >= 13440 or current_real_count >= 5
-
-                # ==========================================
-                # 第四步：終局結算（教授 X-Y 軸公式）
-                # Y 軸：造出五隻掠奪者（任務核心目標）
-                # X 軸：產量 + 建築完成度 + 時間效率
-                # ==========================================
-
-
+                MAX_LOOP = 13440.0
+                done = next_obs.last() or current_loop >= MAX_LOOP or current_real_count >= 5
 
                 if done:
-                    # Y 軸
-                    y = min(current_real_count / 5.0, 1.0)
-                    # 0隻=0.0, 1隻=0.2, 2隻=0.4, 3隻=0.6, 4隻=0.8, 5隻=1.0
-
-                    # X 軸三個維度
-                    x1 = y                                         # X1. 掠奪者產量（直接等於Y軸）
-                    x2 = len(achieved_milestones) / 4.0            # X2. 建築完成度（蓋了幾個里程碑）
-                    x3 = 1.0 - (float(current_loop) / 13440.0)     # X3. 時間效率（越快越高）
-
-
-                    # 成功和失敗用不同公式
+                    # 維度 1：時間分數 (權重 0.6) - 越快完成分數越高
+                    # 如果沒造出 5 隻，時間分數為 0
+                    time_score = 0.0
                     if current_real_count >= 5:
-                        # 成功：產量 + 建築 + 時間效率都算
-                        raw_score = 0.7 * x1 + 0.1 * x2 + 0.2 * x3
+                        time_score = 1.0 - (current_loop / MAX_LOOP)
+                        time_score = max(0.0, time_score) # 確保不為負
+                    
+                    # 維度 2：里程碑分數 (權重 0.2) - 蓋了幾種關鍵建築
+                    milestone_score = len(achieved_milestones) / 4.0
+                    
+                    # 維度 3：掠奪者數量分數 (權重 0.1)
+                    marauder_score = min(current_real_count / 5.0, 1.0)
+                    
+                    # 維度 4：操作效率分數 (權重 0.1) - 容忍一定比例的錯誤，過多則扣分
+                    # 假設整局平均操作 500 次，失敗 50 次以內算滿分 1.0
+                    efficiency_score = max(0.0, 1.0 - (failed_actions / 100.0))
+                    
+                    # 💥 最終總分計算 (0.6, 0.2, 0.1, 0.1)
+                    raw_final_score = (
+                        (0.6 * time_score) + 
+                        (0.2 * milestone_score) + 
+                        (0.1 * marauder_score) + 
+                        (0.1 * efficiency_score)
+                    )
+                    
+                    # 將 0.0 ~ 1.0 的分數，映射到 -1.0 ~ 1.0 的區間
+                    # 如果連一隻都沒生出來，分數一定會是負的
+                    if current_real_count >= 5:
+                        # 成功時，分數保底 0.5 以上，速度越快越高分
+                        step_reward += 0.5 + (raw_final_score * 0.5) 
                     else:
-                        # 失敗：只看造了幾隻，直接給負數
-                        # 0隻=-0.7, 1隻=-0.5, 2隻=-0.3, 3隻=-0.1, 4隻=+0.1
-                        raw_score = x1 - 0.7
+                        # 失敗時，根據蓋房子的進度給予 -1.0 到 0.0 之間的懲罰
+                        step_reward += (raw_final_score * 2.0) - 1.0
+                        
+                    print(f"🏁 終局結算: 時間={time_score:.2f}, 建築={milestone_score:.2f}, 產量={marauder_score:.2f}, 效率={efficiency_score:.2f} => 總分={step_reward:.4f}")
 
-                    # 統一用 tanh 壓縮到 [-1, +1]
-                    step_reward = raw_score * 3.0
-
-                    # 更新最短時間紀錄（只在成功時）
-                    if current_real_count >= 5 and float(current_loop) < best_record[0]:
-                        best_record[0] = float(current_loop)
-                        with open(best_time_path, "w") as f:
-                            f.write(str(best_record[0]))
-                        print(f"🔥 新紀錄！最短完成時間: {best_record[0]} 幀")
-
-                    print(f"終局: Y={y:.2f}, X1={x1:.2f}, X2={x2:.2f}, X3={x3:.2f}, raw={raw_score:.4f}")
-                
-
-                # ==========================================
-                # 第五步：tanh 壓縮（核心）
-                # 只有終局幀的 step_reward 不為 0，
-                # 過程幀全部是 0，不干擾訓練。
-                # ==========================================
-                scaled_reward = math.tanh(step_reward)
+                # 我們不再每一幀都用 tanh 壓縮，而是保持 step_reward 的原值
+                # 只有在終局時，step_reward 才會有較大的數值
+                scaled_reward = np.clip(step_reward, -1.0, 1.0) 
                 episode_reward += scaled_reward
                 #episode_reward += scaled_reward  # 累計這局的總分（用於 CSV 記錄與排行榜）
                 if done:
@@ -941,27 +1409,53 @@ def main(argv):
                 # ==========================================
                 # 第六步：取得下一幀狀態，並打包成訓練用的 Transition
                 # ==========================================
+                # ==========================================
+                # 第六步：取得下一幀狀態，並打包成訓練用的 Transition
+                # ==========================================
+                # 將這一幀的狀態打包
                 next_time_loop = int(next_obs.observation.game_loop[0])
                 next_state = get_state_vector(
-                    next_obs,
-                    getattr(agent, 'active_parameter', 1),
-                    18,
-                    a_id,
-                    current_action_success,
-                    next_time_loop
-                )
+                    next_obs, p_id, 18, a_id, current_action_success, next_time_loop)
 
-                # 將這一幀的 (狀態, 動作, 獎勵, 下一狀態, 結束旗標, LSTM記憶) 打包存入 N-Step 緩衝區
-                # ✨ 核心修正：將 p_id 也打包進去 (記得減 1 轉回 0~63 索引)
-                current_transition = (state, action_index, p_id - 1, scaled_reward, next_state, done, hidden_state, next_hidden_state, next_allowed_indices)
-                n_step_buffer.append(current_transition)
+                # ✨ 核心修復 1：在包裹中多塞一個 current_action_success 當作第 10 個參數
+                current_transition = (state, action_index, p_id - 1, scaled_reward, next_state, done, hidden_state, next_hidden_state, next_allowed_indices, current_action_success)
+                
+                # 依然維持只有成功的動作才放入 N-Step 緩衝
+                if current_action_success == 1.0:
+                    n_step_buffer.append(current_transition)
+                else:
+                    failed_transition = (state, action_index, p_id - 1, scaled_reward, next_state, done, hidden_state, next_hidden_state, 0.0, next_allowed_indices, current_action_success)
+                    episode_memory.append(failed_transition)
+                    # (下方清空 n_step_buffer 的邏輯維持不變... 但打包 n_transition 時要記得補上這個欄位！)
+                    
+                    # 並且清空當前的緩衝區，因為這條「順暢的連續技」已經被失敗打斷了！
+                    # 如果不清空，前面成功的步驟就會誤以為這個失敗是它造成的
+                    while len(n_step_buffer) > 0:
+                        fail_n = len(n_step_buffer)
+                        n_reward = sum([n_step_buffer[i][3] * (GAMMA ** i) for i in range(fail_n)])
+                        n_state = n_step_buffer[0][0]
+                        n_action = n_step_buffer[0][1]
+                        n_p_id = n_step_buffer[0][2]          
+                        n_next_state = n_step_buffer[-1][4]   
+                        n_done = n_step_buffer[-1][5]
+                        n_hidden_in = (n_step_buffer[0][6][0].cpu(), n_step_buffer[0][6][1].cpu())
+                        n_hidden_out = (n_step_buffer[-1][7][0].cpu(), n_step_buffer[-1][7][1].cpu())
+                        # ... 前面維持不變
+                        n_next_allowed = n_step_buffer[-1][8]
+                        n_success_flag = n_step_buffer[0][9] # ✨ 拿出這一步當時到底有沒有成功
+                        
+                        # ✨ 核心修復 2：把 n_success_flag 放進包裹的最後面
+                        n_transition = (n_state, n_action, n_p_id, n_reward, n_next_state, n_done, n_hidden_in, n_hidden_out, GAMMA ** fail_n, n_next_allowed, n_success_flag)
+                        
+                        episode_memory.append(n_transition)
+                        n_step_buffer.popleft()
 
                 # 更新觀測值與狀態，準備進入下一幀
-                obs = next_obs
+                '''obs = next_obs
                 state = next_state
                 hidden_state = (next_hidden_state[0].detach(), next_hidden_state[1].detach())
                 last_action_id = a_id
-                last_action_success = current_action_success
+                last_action_success = current_action_success'''
 
 
 
@@ -986,35 +1480,37 @@ def main(argv):
                     # 👉 修正：hidden_state 現在在 6 跟 7
                     n_hidden_in = (n_step_buffer[0][6][0].cpu(), n_step_buffer[0][6][1].cpu())
                     n_hidden_out = (n_step_buffer[-1][7][0].cpu(), n_step_buffer[-1][7][1].cpu())
-                    n_next_allowed = n_step_buffer[-1][8] # 👉 修正：到了 8
-
-                    # ✨ 修正 2：打包成新的包裹時，把 n_p_id 放進第三個位置 (index 2)
-                    n_transition = (n_state, n_action, n_p_id, n_reward, n_next_state, n_done, n_hidden_in, n_hidden_out, GAMMA ** N_STEP, n_next_allowed)
+                    # ... 前面維持不變
+                    n_next_allowed = n_step_buffer[-1][8]
+                    n_success_flag = n_step_buffer[0][9] # ✨ 拿出這一步當時到底有沒有成功
+                    
+                    # ✨ 核心修復 2：把 n_success_flag 放進包裹的最後面
+                    n_transition = (n_state, n_action, n_p_id, n_reward, n_next_state, n_done, n_hidden_in, n_hidden_out, GAMMA ** N_STEP, n_next_allowed, n_success_flag)
                     
                     episode_memory.append(n_transition)
                     n_step_buffer.popleft()
 
                 # 3. 遊戲結束時，強制清空並結算緩衝區裡剩下的尾巴
                 # 3. 遊戲結束時，強制清空並結算緩衝區裡剩下的尾巴
+                # 3. 遊戲結束時，強制清空並結算緩衝區裡剩下的尾巴
                 if done:
                     while len(n_step_buffer) > 0:
-                        actual_n = len(n_step_buffer)
-                        # 👉 同樣把 [2] 改成 [3]
-                        n_reward = sum([n_step_buffer[i][3] * (GAMMA ** i) for i in range(actual_n)])
+                        fail_n = len(n_step_buffer)
+                        # ✅ 這裡已經修正為 range(end_n)
+                        n_reward = sum([n_step_buffer[i][3] * (GAMMA ** i) for i in range(end_n)])
                         
                         n_state = n_step_buffer[0][0]
                         n_action = n_step_buffer[0][1]
-                        n_p_id = n_step_buffer[0][2]          # ✨ 新增
-                        n_next_state = n_step_buffer[-1][4]   # 👉 修正
+                        n_p_id = n_step_buffer[0][2]          
+                        n_next_state = n_step_buffer[-1][4]   
                         n_done = n_step_buffer[-1][5]
                         
                         n_hidden_in = (n_step_buffer[0][6][0].cpu(), n_step_buffer[0][6][1].cpu())
                         n_hidden_out = (n_step_buffer[-1][7][0].cpu(), n_step_buffer[-1][7][1].cpu())
                         n_next_allowed = n_step_buffer[-1][8]
+                        n_success_flag = n_step_buffer[0][9] 
                         
-                        # ✨ 同步把 n_p_id 放進來
-                        n_transition = (n_state, n_action, n_p_id, n_reward, n_next_state, n_done, n_hidden_in, n_hidden_out, GAMMA ** actual_n, n_next_allowed)
-                        
+                        n_transition = (n_state, n_action, n_p_id, n_reward, n_next_state, n_done, n_hidden_in, n_hidden_out, GAMMA ** end_n, n_next_allowed, n_success_flag)
                         episode_memory.append(n_transition)
                         n_step_buffer.popleft()
                
@@ -1029,7 +1525,7 @@ def main(argv):
                         if len(success_memory) > MAX_ELITE_MEMORY:
                             success_memory.pop()
                             
-                        print(f"🏆 菁英榜更新！目前收錄 {len(success_memory)} 局，歷史最高分: {success_memory[0][0]:.1f}")
+                        print(f"🏆 菁英榜更新！目前收錄 {len(success_memory)} 局，歷史最短時間: {success_memory[0][0]:.0f} 幀")
                         
                         # ✨ 修改：不要每局存，排行榜數量是 5 的倍數時才寫入硬碟
                         if len(success_memory) % 5 == 0:
@@ -1061,7 +1557,8 @@ def main(argv):
                 total_reward += step_reward
                 last_action_id = a_id
                 last_action_success = current_action_success
-                current_block = getattr(agent, 'active_parameter', 1)
+                # ✨ 核心修復：直接將真實決策的 p_id 餵給神經網路當作記憶！
+                current_block = p_id
 
                 # --- 終局判定：跳出迴圈寫入日誌 ---
 
