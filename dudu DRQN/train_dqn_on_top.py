@@ -742,9 +742,7 @@ def main(argv):
                         # ==========================================
                         a_id = VALID_ACTIONS[action_index]
                         
-                        if a_id == last_action_id and last_action_success == 0.0:
-                            # 強制換位也要改成 1~100
-                            p_id = random.randint(1, 100)
+                        
                 # ==========================================
                 # ==========================================
                 # ✨ 核心防彈機制：在一開始就先給定預設發呆動作！
@@ -922,20 +920,47 @@ def main(argv):
                 # ==========================================
                 # 第六步：取得下一幀狀態，並打包成訓練用的 Transition
                 # ==========================================
+                # ==========================================
+                # 第六步：取得下一幀狀態，並打包成訓練用的 Transition
+                # ==========================================
                 next_time_loop = int(next_obs.observation.game_loop[0])
                 next_state = get_state_vector(
                     next_obs,
-                    getattr(agent, 'active_parameter', 1),
+                    p_id, # ✨ 確保 next_state 看到的是最新決定的 p_id
                     18,
                     a_id,
                     current_action_success,
                     next_time_loop
                 )
 
-                # 將這一幀的 (狀態, 動作, 獎勵, 下一狀態, 結束旗標, LSTM記憶) 打包存入 N-Step 緩衝區
-                # ✨ 核心修正：將 p_id 也打包進去 (記得減 1 轉回 0~63 索引)
                 current_transition = (state, action_index, p_id - 1, scaled_reward, next_state, done, hidden_state, next_hidden_state, next_allowed_indices)
-                n_step_buffer.append(current_transition)
+                
+                # ✨ 核心修復：只有「成功」的動作，才允許放入 N-Step 緩衝區累積未來獎勵！
+                if current_action_success == 1.0:
+                    n_step_buffer.append(current_transition)
+                else:
+                    # ❌ 如果動作失敗撞牆，立刻將這「單獨一步」的失敗經驗存入最終記憶，絕不與未來的成功混為一談！
+                    # 這裡將 gamma 設為 0，代表失敗的動作沒有任何未來價值
+                    failed_transition = (state, action_index, p_id - 1, scaled_reward, next_state, done, hidden_state, next_hidden_state, 0.0, next_allowed_indices)
+                    episode_memory.append(failed_transition)
+                    
+                    # 並且清空當前的緩衝區，因為這條「順暢的連續技」已經被失敗打斷了！
+                    # 如果不清空，前面成功的步驟就會誤以為這個失敗是它造成的
+                    while len(n_step_buffer) > 0:
+                        actual_n = len(n_step_buffer)
+                        n_reward = sum([n_step_buffer[i][3] * (GAMMA ** i) for i in range(actual_n)])
+                        n_state = n_step_buffer[0][0]
+                        n_action = n_step_buffer[0][1]
+                        n_p_id = n_step_buffer[0][2]          
+                        n_next_state = n_step_buffer[-1][4]   
+                        n_done = n_step_buffer[-1][5]
+                        n_hidden_in = (n_step_buffer[0][6][0].cpu(), n_step_buffer[0][6][1].cpu())
+                        n_hidden_out = (n_step_buffer[-1][7][0].cpu(), n_step_buffer[-1][7][1].cpu())
+                        n_next_allowed = n_step_buffer[-1][8]
+                        
+                        n_transition = (n_state, n_action, n_p_id, n_reward, n_next_state, n_done, n_hidden_in, n_hidden_out, GAMMA ** actual_n, n_next_allowed)
+                        episode_memory.append(n_transition)
+                        n_step_buffer.popleft()
 
                 # 更新觀測值與狀態，準備進入下一幀
                 '''obs = next_obs
@@ -1042,7 +1067,8 @@ def main(argv):
                 total_reward += step_reward
                 last_action_id = a_id
                 last_action_success = current_action_success
-                current_block = getattr(agent, 'active_parameter', 1)
+                # ✨ 核心修復：直接將真實決策的 p_id 餵給神經網路當作記憶！
+                current_block = p_id
 
                 # --- 終局判定：跳出迴圈寫入日誌 ---
 
