@@ -1495,9 +1495,8 @@ def main(argv):
                 # 3. 遊戲結束時，強制清空並結算緩衝區裡剩下的尾巴
                 if done:
                     while len(n_step_buffer) > 0:
-                        fail_n = len(n_step_buffer)
-                        # ✅ 這裡已經修正為 range(end_n)
-                        n_reward = sum([n_step_buffer[i][3] * (GAMMA ** i) for i in range(end_n)])
+                        end_n = len(n_step_buffer)  # ✅ 統一叫 end_n
+                        n_reward = sum([n_step_buffer[i][3] * (GAMMA ** i) for i in range(end_n)]) # ✅ 這裡也是 end_n
                         
                         n_state = n_step_buffer[0][0]
                         n_action = n_step_buffer[0][1]

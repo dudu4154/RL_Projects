@@ -1070,13 +1070,60 @@ def main(argv):
             mean_loss.backward()
             optimizer.step()
 
+    # ✨ 全新路線：解除星海視窗鎖定，改為可用滑鼠自由縮放的正常視窗
+   # ✨ 全新路線：保持視窗模式，並由程式自動精準校正大小
+    def resize_sc2_to_grid():
+        import ctypes
+        import time
+
+        # 定義 Windows 矩形結構，用來計算邊框厚度
+        class RECT(ctypes.Structure):
+            _fields_ = [("left", ctypes.c_long),
+                        ("top", ctypes.c_long),
+                        ("right", ctypes.c_long),
+                        ("bottom", ctypes.c_long)]
+
+        print("⏳ 等待星海視窗出現，準備將畫面精準縮放...")
+        for _ in range(30): 
+            time.sleep(1)
+            
+            # 支援中英文雙語系視窗尋找
+            hwnd = ctypes.windll.user32.FindWindowW(None, "《星海爭霸II》")
+            if not hwnd:
+                hwnd = ctypes.windll.user32.FindWindowW(None, "StarCraft II")
+                
+            if hwnd:
+                # 1. 取得視窗目前的樣式 (保留原生的標題列)
+                style = ctypes.windll.user32.GetWindowLongW(hwnd, -16)
+                
+                # 2. 設定我們想要的「內部遊戲畫面」大小 (剛好等於你的格子)
+                target_w = 856
+                target_h = 423
+                
+                # 3. 讓 Windows 幫我們計算：如果內部要 856x423，那加上標題列跟邊框後，外部視窗總共要多大？
+                rect = RECT(0, 0, target_w, target_h)
+                ctypes.windll.user32.AdjustWindowRect(ctypes.byref(rect), style, False)
+                
+                final_w = rect.right - rect.left
+                final_h = rect.bottom - rect.top
+                
+                # 4. 強制改變視窗大小 (保留原本的位置，只改大小)
+                # SWP_NOMOVE (0x0002) 代表不移動位置；SWP_NOZORDER (0x0004) 代表不改變圖層
+                ctypes.windll.user32.SetWindowPos(hwnd, 0, 0, 0, final_w, final_h, 0x0002 | 0x0004)
+                
+                print(f"✅ 星海畫面已精準設定為 {target_w}x{target_h}！你可以抓著標題列自由拖曳了！")
+                break
+
+    # 🚀 在啟動星海前，派執行緒去背景等待校正
+    threading.Thread(target=resize_sc2_to_grid, daemon=True).start()
+
+    # 原本啟動環境的程式碼保持不動
     with sc2_env.SC2Env(
         map_name="Simple96",
-        players=[sc2_env.Agent(sc2_env.Race.terran),sc2_env.Bot(sc2_env.Race.terran, sc2_env.Difficulty.very_easy)], #sc2_env.Agent(sc2_env.Race.terran)
+        players=[sc2_env.Agent(sc2_env.Race.terran),sc2_env.Bot(sc2_env.Race.terran, sc2_env.Difficulty.very_easy)],
         agent_interface_format=sc2_env.AgentInterfaceFormat(
             feature_dimensions=sc2_env.Dimensions(screen=84, minimap=64), use_raw_units=False),
         step_mul=32, realtime=False
-        
     ) as env:
         
         current_session_file = os.path.join(log_dir, f"dqn_training_log_{int(time.time())}.csv")
