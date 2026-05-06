@@ -487,14 +487,16 @@ def main(argv):
             "food_used": int(player.food_used),
             "food_cap": int(player.food_cap),
             "idle_workers": int(player.idle_worker_count),
-            "depots": count_units_from_screen(obs, 19, 69.0),
-            "refineries": count_units_from_screen(obs, 20, 97.0),
-            "barracks": count_units_from_screen(obs, 21, 137.0),
-            "techlabs": count_units_from_screen(obs, 37, 85.0),
-            "marines": count_units_from_screen(obs, 48, 10.0),
-            "marauders": count_units_from_screen(obs, 51, 10.0),
             "loop": current_loop,
             "remain_loop": max(0, 13440 - current_loop),
+            
+            # ✨ 全部改讀取全域追蹤器的最高紀錄，UI 再也不會閃爍了！
+            "depots": SESSION_TRACKER["depots"],
+            "barracks": SESSION_TRACKER["barracks"],
+            "refineries": SESSION_TRACKER["refineries"],
+            "techlabs": SESSION_TRACKER["techlabs"],
+            "marines": SESSION_TRACKER["marines"],
+            "marauders": SESSION_TRACKER["marauders"],
         }
 
     def format_loop_to_mmss(loop_value):
@@ -719,10 +721,11 @@ def main(argv):
         x, y, w, h = rect
         conf = q_values_to_confidence(q_values, allowed_indices, temperature=0.05)
 
+        
         col_action = x + 15
-        col_conf   = x + 175
-        col_mask   = x + 410
-        col_tech   = x + 510
+        col_conf   = x + 165  # 稍微往左收一點
+        col_mask   = x + 385  # 往左移，挪出空間給長文字
+        col_tech   = x + 520  # 往右移，徹底拉開與 Mask Status 的距離
 
         header_y = y + 30
         row_y = y + 65
@@ -997,6 +1000,14 @@ def main(argv):
     def get_action_mask(target_obs, last_act_id=0): 
         """ 根據當前畫面狀態，回傳合法的 Action 索引列表 """
         player = target_obs.observation.player
+        
+        # ✨ 直接調用全域記憶，AI 切走視角也不會忘記自己蓋過什麼科技了！
+        barracks = SESSION_TRACKER["barracks"]
+        refineries = SESSION_TRACKER["refineries"]
+        techlabs = SESSION_TRACKER["techlabs"]
+        depots = SESSION_TRACKER["depots"]
+        
+        # (下方的 allowed_acts 判斷維持原樣...)
         s_unit = target_obs.observation.feature_screen.unit_type
         s_player = target_obs.observation.feature_screen.player_relative
         workers = int(player.food_workers)
@@ -1236,11 +1247,22 @@ def main(argv):
                 # --- 修正 1：初始化歷史最低時間紀錄 ---
 
 
-        for ep in range(10000):
+        # ✨ 建立全域視野追蹤器 (放在 for 迴圈外面)
+        SESSION_TRACKER = {
+            "depots": 0, "barracks": 0, "refineries": 0, 
+            "techlabs": 0, "marines": 0, "marauders": 0
+        }
 
+        for ep in range(10000):
             agent = ProductionAI()
             obs_list = env.reset()
             obs = obs_list[0]
+            
+            # ✨ 每一局開始時，清空記憶
+            for key in SESSION_TRACKER:
+                SESSION_TRACKER[key] = 0
+                
+            # ... (下方保持原樣)
             
             episode_memory = []  
             # ✨ 1. N-Step 新增：準備一個長度為 3 的滑動視窗
@@ -1315,8 +1337,17 @@ def main(argv):
                 techlab_pixels = np.sum((s_unit == 37) & (s_player == 1))
                 current_techlabs = int(np.round(techlab_pixels / 85.0)) # 真實科技室數
                 # 👇 新增：計算補給站數量 (防呆用)
+                # 👇 新增：計算補給站數量 (防呆用)
                 depot_pixels = np.sum((s_unit == 19) & (s_player == 1))
                 current_depots = int(np.round(depot_pixels / 69.0))
+                
+                # =====================================================
+                # ✨ 同步更新全域最高紀錄 (使用 max 確保數量不會因為切視角而歸零)
+                # =====================================================
+                SESSION_TRACKER["depots"] = max(SESSION_TRACKER["depots"], current_depots)
+                SESSION_TRACKER["barracks"] = max(SESSION_TRACKER["barracks"], current_barracks)
+                SESSION_TRACKER["refineries"] = max(SESSION_TRACKER["refineries"], current_refineries)
+                SESSION_TRACKER["techlabs"] = max(SESSION_TRACKER["techlabs"], current_techlabs)
                 
                 # ==========================================
                 # ✨ 升級版：科技樹動態動作遮罩 (Tech-Tree Masking)
@@ -1423,6 +1454,10 @@ def main(argv):
                 u_pixels = np.sum((next_s_unit == 51) & (next_s_player == 1))
                 current_real_count = int(np.round(float(u_pixels) / 10.0))
                 current_real_count = min(current_real_count, 5)
+
+                # ✨ 更新兵力最高紀錄
+                SESSION_TRACKER["marines"] = max(SESSION_TRACKER["marines"], marine_count)
+                SESSION_TRACKER["marauders"] = max(SESSION_TRACKER["marauders"], current_real_count)
 
                 
                 actual_id = agent.locked_action if agent.locked_action is not None else a_id
