@@ -1407,21 +1407,14 @@ def main(argv):
                 # 2. 掠奪者產量追蹤 (不直接給分，用於終局結算)
 
                 # 替換為以下邏輯：
-                # train_dqn_on_top.py (約 1410 行處)
-
-                    # 1. 先取出舊的數量，如果沒有就預設為 0
-                    prev_count = getattr(agent, 'last_target_count', 0)
-
-                    # 2. 進行比較
-                    if current_real_count > prev_count:
-                        # 3. 使用剛剛取出的局部變數 prev_count 進行減法，避免 AttributeError
-                        diff = current_real_count - prev_count
-                        
-                        # 4. 更新 agent 的屬性 (這行會自動幫 agent 創立或更新該屬性)
-                        agent.last_target_count = current_real_count
-                        
-                        step_reward += 0.5 * diff 
-                        print(f"🎯 掠奪者產出！目前進度: {current_real_count}/5, 即時加分 +{0.5 * diff}")
+                if current_real_count > getattr(agent, 'last_target_count', 0):
+                    # 計算增加了幾隻 (通常是一次加一隻)
+                    diff = current_real_count - agent.last_target_count
+                    agent.last_target_count = current_real_count
+                    
+                    # 每生出一隻，給予即時大獎勵
+                    step_reward += 0.5 * diff 
+                    print(f"🎯 掠奪者產出！目前進度: {current_real_count}/5, 即時加分 +{0.5 * diff}")
 
                 # 3. 無效動作懲罰 (Process Penalty)
                 # 為了讓訓練穩定，過程中的錯誤還是給予微小的懲罰，促使它尋找合法座標

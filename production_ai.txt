@@ -71,15 +71,16 @@ class ProductionAI:
 
     #檢查當前選取狀態中是否包含工兵。
     def _is_scv_selected(self, obs):
-        # 檢查單一選取：使用 len() 判斷是否有選中單位
+        valid_scv_ids = [45, 104, 105, 106, 107]
+        
+        # 1. 檢查單一選取
         if len(obs.observation.single_select) > 0:
-            return obs.observation.single_select[0].unit_type == SCV_ID
+            return obs.observation.single_select[0].unit_type == SCV_ID  # 🚨 只要不是空手，一律回傳 False 並中斷！
         
         # 檢查複數選取：同樣使用 len()
         if len(obs.observation.single_select) > 0:
-            # 這裡不能只檢查 SCV_ID，因為抱著礦的工兵 ID 可能會變
-            u_type = obs.observation.single_select[0].unit_type
-            return u_type in [45, 104, 105, 106, 107]
+            return obs.observation.multi_select[0].unit_type in valid_scv_ids
+            
         return False
     
     #尋找畫面上所有指定 ID 建築的中心點。
@@ -930,7 +931,7 @@ class ProductionAI:
             
             # 狀態 A：第一幀啟動 (抓取工兵並鎖定)
             self.locked_action = 42
-            self.lock_timer = 10
+            self.lock_timer = 0
             return self._select_mineral_worker(obs, unit_type, available)
         elif action_id == 43:
             # 1. 判斷敵方基地坐標 (基於你目前的 base_location_code)
