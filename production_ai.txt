@@ -453,7 +453,7 @@ class ProductionAI:
 
         # [Action 14] 製造 SCV 
         elif action_id == 14:
-            if player.minerals >= 200 and actions.FUNCTIONS.Train_SCV_quick.id in available:
+            if player.minerals >= 50 and actions.FUNCTIONS.Train_SCV_quick.id in available:
                 return actions.FUNCTIONS.Train_SCV_quick("now")
             
             # 【關鍵】如果正在鎖定蓋房子，不要去點主堡，否則工兵選取會消失
@@ -527,10 +527,9 @@ class ProductionAI:
                                    any(u.unit_type == BARRACKS_ID for u in obs.observation.multi_select)
             
             if is_barracks_selected:
-                # 已經選中了兵營，但按鈕還沒出來
-                # (可能是因為資源不足，或是點到了沒有科技實驗室的兵營)
-                self.locked_action = 18 # 繼續維持鎖定
-                return actions.FUNCTIONS.no_op() # 原地等待按鈕加載或超時放棄
+                # 👇 關鍵修正：已經選到兵營了，但按鈕沒出來？代表兵營在忙！立刻放棄並解鎖！
+                self.locked_action = None 
+                return actions.FUNCTIONS.no_op()
                 
             # 3. 還沒選中兵營：去畫面上隨機點擊一個兵營，並「啟動鎖定」
             self.locked_action = 18
@@ -895,11 +894,11 @@ class ProductionAI:
         # ==========================================
         # [Action 42] 派遣工兵採集瓦斯 (精準計數 + 3人硬上限版)
         # ==========================================
+        
         elif action_id == 42:
             refinery_centers = self._find_units_centers(unit_type, REFINERY_ID)
             
             # ✨ 防護 1：如果沒瓦斯廠，或已經滿編 (每座廠 3 人)，直接強制放棄！
-            # 使用 getattr 避免初始化忘記宣告變數而報錯
             if not refinery_centers or getattr(self, 'gas_workers_assigned', 0) >= len(refinery_centers) * 3:
                 self.locked_action = None
                 return actions.FUNCTIONS.no_op()
@@ -908,20 +907,23 @@ class ProductionAI:
                 # 等待 UI 頭像出現
                 if self._is_scv_selected(obs):
                     target = random.choice(refinery_centers)
-                    self.locked_action = None
-                    self.lock_timer = 0
                     
-                    # ✨ 防護 2：只有在「真正下達採集指令」的這一瞬間，才把計數器 +1！
-                    # 這樣就絕對不會發生「點到地板卻以為有去採」的 UI 幻覺了
-                    self.gas_workers_assigned = getattr(self, 'gas_workers_assigned', 0) + 1
-                    
-                    if actions.FUNCTIONS.Harvest_Return_quick.id in available:
-                        return actions.FUNCTIONS.Harvest_Gather_screen("now", target)
-                    
+                    # ✨ 防護 2：確認指令「真的可以執行」，才解除鎖定並計數！
+                    # （徹底解決幽靈計數的 Bug）
                     if actions.FUNCTIONS.Harvest_Gather_screen.id in available:
+                        self.locked_action = None
+                        self.lock_timer = 0
+                        self.gas_workers_assigned = getattr(self, 'gas_workers_assigned', 0) + 1
                         return actions.FUNCTIONS.Harvest_Gather_screen("now", target)
+                        
                     elif actions.FUNCTIONS.Smart_screen.id in available:
+                        self.locked_action = None
+                        self.lock_timer = 0
+                        self.gas_workers_assigned = getattr(self, 'gas_workers_assigned', 0) + 1
                         return actions.FUNCTIONS.Smart_screen("now", target)
+                    else:
+                        # 如果 UI 出來了但還不能點 (例如瓦斯廠正在蓋，系統判定不能右鍵)，保持鎖定繼續等
+                        return actions.FUNCTIONS.no_op()
                 
                 # 如果 UI 還沒出來，乖乖等待
                 return actions.FUNCTIONS.no_op()
@@ -930,7 +932,6 @@ class ProductionAI:
             self.locked_action = 42
             self.lock_timer = 10
             return self._select_mineral_worker(obs, unit_type, available)
-        
         elif action_id == 43:
             # 1. 判斷敵方基地坐標 (基於你目前的 base_location_code)
             # 如果我方在左上 (0)，敵方就在右下；反之亦然
@@ -1205,7 +1206,7 @@ def main(argv):
             print("--- 啟動新對局 ---")
             obs_list = env.reset()
             while True:
-                action_id = 41 #random.choice([1,47])#1#random.randint(1, 41)
+                action_id = random.randint(11,42)#14 #random.choice([1,47])#1
                 param = random.randint(1, 64)#1# # 網格限制 1-16
                 
                 sc2_action = agent.get_action(obs_list[0], action_id, parameter=param)

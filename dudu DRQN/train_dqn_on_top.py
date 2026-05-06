@@ -280,7 +280,7 @@ def main(argv):
         target_model.load_state_dict(brain_model.state_dict())
         print("✅ 載入成功！接續之前的記憶繼續訓練...")
 
-    epsilon = 0.30; epsilon_decay = 0.995; gamma = 0.998
+    epsilon = 1.00; epsilon_decay = 0.995; gamma = 0.998
 
     def draw_dual_head_network(surface, model, state_vector, allowed_indices, hidden_state=None):
         import numpy as np
@@ -299,7 +299,29 @@ def main(argv):
         # ===== 自動維度 =====
         STATE_DIM = len(state_vector)
 
-        input_labels = [f"特徵{i}" for i in range(STATE_DIM)]
+        # ===== 20 個特徵的真實名稱 =====
+        input_labels = [
+            "工兵總數",          # 0: food_workers
+            "閒置工兵",          # 1: idle_worker_count
+            "晶礦比例",          # 2: minerals
+            "瓦斯比例",          # 3: vespene
+            "資源差距",          # 4: mineral - vespene
+            "目前人口",          # 5: food_used
+            "剩餘人口空間",       # 6: food_cap - food_used
+            "補給站數量",         # 7: count_unit(19)
+            "瓦斯廠數量",         # 8: count_unit(20)
+            "軍營數量",          # 9: count_unit(21)
+            "科技室數量",         # 10: count_unit(37)
+            "選中工兵",          # 11: is_scv_selected
+            "選中主堡",          # 12: is_cc_selected
+            "選中兵營",          # 13: is_barracks_selected
+            "陸戰隊數",          # 14: count_unit(48)
+            "掠奪者數",          # 15: count_unit(51)
+            "上步成功",          # 16: last_action_success
+            "上一動作ID",        # 17: last_action_id
+            "上一座標",          # 18: current_block
+            "遊戲時間"           # 19: current_loop
+        ]
 
         action_labels = [
             "蓋補給站","蓋兵營","蓋瓦斯","造工兵","造陸戰隊",
@@ -371,11 +393,27 @@ def main(argv):
             t = num_font.render(str(txt), True, (255,255,255))
             hq_surface.blit(t, (pos[0]-t.get_width()//2, pos[1]-t.get_height()//2))
 
-        for i,p in enumerate(in_pos): node(p,i, state_vector[i]>0.1)
-        for i,p in enumerate(fc1_pos): node(p,i)
-        for i,p in enumerate(lstm_pos): node(p,i)
-        for i,p in enumerate(act_pos):
-            node(p,i, best=(i==best and i in allowed_indices), masked=(i not in allowed_indices))
+        # ===== 畫節點與標籤 =====
+        for i, p in enumerate(in_pos): 
+            node(p, i, state_vector[i] > 0.1)
+            # 在輸入節點「左側」畫上特徵名稱
+            label_txt = font.render(input_labels[i], True, (180, 200, 220))
+            hq_surface.blit(label_txt, (p[0] - label_txt.get_width() - 15 * SCALE, p[1] - label_txt.get_height() // 2))
+
+        for i, p in enumerate(fc1_pos): 
+            node(p, i)
+            
+        for i, p in enumerate(lstm_pos): 
+            node(p, i)
+
+        for i, p in enumerate(act_pos):
+            node(p, i, best=(i == best and i in allowed_indices), masked=(i not in allowed_indices))
+            # 在輸出節點「右側」畫上動作名稱，並根據狀態改變顏色
+            text_color = (255, 205, 90) if (i == best and i in allowed_indices) else (180, 200, 220)
+            if i not in allowed_indices: text_color = (80, 80, 80) # 灰暗色代表被 Mask 擋住不能用
+            
+            label_txt = font.render(action_labels[i], True, text_color)
+            hq_surface.blit(label_txt, (p[0] + 15 * SCALE, p[1] - label_txt.get_height() // 2))
 
         final = pygame.transform.smoothscale(hq_surface,(sw,sh))
         surface.blit(final,(0,0))
@@ -908,7 +946,7 @@ def main(argv):
         player = target_obs.observation.player
         s_unit = target_obs.observation.feature_screen.unit_type
         s_player = target_obs.observation.feature_screen.player_relative
-        
+        workers = int(player.food_workers)
         barracks = int(np.round(np.sum((s_unit == 21) & (s_player == 1)) / 137.0))
         refineries = int(np.round(np.sum((s_unit == 20) & (s_player == 1)) / 97.0))
         techlabs = int(np.round(np.sum((s_unit == 37) & (s_player == 1)) / 85.0))
@@ -939,20 +977,23 @@ def main(argv):
         if refineries >= 1 and 11 in allowed_acts: allowed_acts.remove(11)
         has_geyser = np.any(s_unit == 342) or np.any(s_unit == 341)
         if not has_geyser and 11 in allowed_acts: allowed_acts.remove(11)
-        if refineries == 0 and 42 in allowed_acts: allowed_acts.remove(42)
-        
-        
-            
+        if (refineries == 0 or getattr(agent, 'gas_workers_assigned', 0) >= 2) and 42 in allowed_acts: 
+            allowed_acts.remove(42)
+        if supply_surplus >= 20 and 1 in allowed_acts: allowed_acts.remove(1)
+        if barracks >= 3 and 2 in allowed_acts: allowed_acts.remove(2)
+        if refineries > 0 and 11 in allowed_acts: 
+            allowed_acts.remove(11)
         if player.idle_worker_count == 0 and 41 in allowed_acts: 
             allowed_acts.remove(41)
-        
+        if workers > 18 and 14 in allowed_acts: 
+            allowed_acts.remove(14)
         if supply_surplus < 1:
             for act in [14, 16]: 
                 if act in allowed_acts: allowed_acts.remove(act)
         if supply_surplus < 2 and 18 in allowed_acts: allowed_acts.remove(18)  # ← 加這行
         
         if minerals < 50:
-            for act in [14, 16, 34]: 
+            for act in [14, 34]: 
                 if act in allowed_acts: allowed_acts.remove(act)
         if minerals < 75 and 11 in allowed_acts: allowed_acts.remove(11)
         if minerals < 100:
@@ -1123,7 +1164,7 @@ def main(argv):
         players=[sc2_env.Agent(sc2_env.Race.terran),sc2_env.Bot(sc2_env.Race.terran, sc2_env.Difficulty.very_easy)],
         agent_interface_format=sc2_env.AgentInterfaceFormat(
             feature_dimensions=sc2_env.Dimensions(screen=84, minimap=64), use_raw_units=False),
-        step_mul=32, realtime=False
+        step_mul=16, realtime=False
     ) as env:
         
         current_session_file = os.path.join(log_dir, f"dqn_training_log_{int(time.time())}.csv")
@@ -1325,7 +1366,10 @@ def main(argv):
                                 # print(f"🚫 引擎拒絕動作 (錯誤碼: {res})，觸發換位機制！")
                                 break
                 else:
-                    current_action_success = 0.0
+                    if agent.locked_action is not None:
+                        current_action_success = 1.0
+                    else:
+                        current_action_success = 0.0
                 # --- 計算獎勵 (Reward) ---
                 # 使用 next_obs 取得最新的玩家狀態與單位數量
                 next_s_unit = next_obs.observation.feature_screen.unit_type
@@ -1358,24 +1402,6 @@ def main(argv):
                     p_id  # 🌟 補上這行！把 AI 決定的網格位置傳給紀錄器
                 )
 
-                # ==========================================
-                # 🏆 穩定版全局計分系統 (Dense Reward Shaping)
-                # ==========================================
-                
-                # ==========================================
-            # 🏆 Reward 計算區塊（教授建議簡化版）
-            # 設計理念：
-            #   - 所有 reward 最終透過 tanh 壓縮至 [-1, +1]
-            #   - 不使用手動除法，讓數學函數自然做 normalization
-            #   - 過程獎勵（里程碑）只給方向，終局獎勵才是真正的學習訊號
-            # ==========================================
-
-                # ==========================================
-                # 🏆 恢復密集獎勵系統 (Dense Reward)
-                # ==========================================
-                # ==========================================
-                # 🏆 精確評估系統 (0.6 時間, 0.2 建築, 0.1 產量, 0.1 效率)
-                # ==========================================
                 step_reward = 0.0
                 
                 # 1. 里程碑追蹤 (不直接給分，用於終局結算)
