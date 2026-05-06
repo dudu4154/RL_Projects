@@ -236,7 +236,7 @@ def main(argv):
 
     RENDER_UI = True # 總開關
     pygame.init()
-    screen = pygame.display.set_mode((1600, 900))
+    screen = pygame.display.set_mode((1500, 860))
     pygame.display.set_caption("DRQN 決策中樞 - 中文化遮罩版")
     
     # 菁英記憶：改成 List，用來做排行榜
@@ -441,6 +441,8 @@ def main(argv):
         "vespene": deque(maxlen=120),
     }
 
+    PAD = 12
+
     def ui_colors():
         return {
             "bg": (6, 18, 24),
@@ -512,7 +514,14 @@ def main(argv):
         draw_panel(surface, rect, "AGENT CONTROL - Feature Screen", fonts, colors)
 
         x, y, w, h = rect
-        inner = pygame.Rect(x + 12, y + 45, w - 24, h - 57)
+
+        inner = pygame.Rect(
+            x + PAD,
+            y + 40,
+            w - PAD * 2,
+            h - 52
+        )
+
         pygame.draw.rect(surface, (15, 30, 38), inner, border_radius=6)
 
         unit_type = obs.observation.feature_screen.unit_type
@@ -764,7 +773,7 @@ def main(argv):
 
             # 交錯底色
             bg = (16, 42, 48) if rank % 2 == 0 else (20, 50, 56)
-            pygame.draw.rect(surface, bg, (x + 10, yy - 4, w - 20, row_h))
+            pygame.draw.rect(surface, bg, (x + PAD, yy - 4, w - PAD * 2, row_h))
 
             text_color = colors["good"] if is_open else colors["gray"]
 
@@ -796,82 +805,157 @@ def main(argv):
             tech_color = colors["good"] if is_open else colors["bad"]
             surface.blit(fonts["small"].render(tech_text, True, tech_color), (col_tech, yy))
 
-    def draw_full_hud(surface, obs, brain_model, state_vector, allowed_indices, hidden_state, valid_actions):
+    def draw_full_hud(surface, obs, brain_model, state_vector,
+                  allowed_indices, hidden_state, valid_actions):
+
+        import numpy as np
+        import pygame
+        import torch
+
+        # =========================================================
+        # 基本設定
+        # =========================================================
         colors = ui_colors()
         fonts = get_fonts()
+
         surface.fill(colors["bg"])
 
+        PAD = 12
+        GAP = 20
+
+        # =========================================================
+        # 即時資料
+        # =========================================================
         s = get_dashboard_snapshot(obs)
+
         HUD_HISTORY["minerals"].append(s["minerals"])
         HUD_HISTORY["vespene"].append(s["vespene"])
 
+        # =========================================================
+        # DRQN 推論
+        # =========================================================
         device = next(brain_model.parameters()).device
+
         with torch.no_grad():
-            st = torch.FloatTensor(np.array(state_vector)).unsqueeze(0).to(device)
+
+            st = torch.FloatTensor(
+                np.array(state_vector)
+            ).unsqueeze(0).to(device)
+
             q_actions, _, _ = brain_model(st, hidden_state)
+
             q_values = q_actions.cpu().numpy()[0]
 
+            # =====================================================
+            # 真正機率（Softmax）
+            # =====================================================
+            temperature = 0.25
+
+            exp_q = np.exp((q_values - np.max(q_values)) / temperature)
+            probs = exp_q / np.sum(exp_q)
+
+        # =========================================================
+        # Layout
+        # =========================================================
         LEFT = 20
         TOP = 20
-        GAP = 10
 
-        LEFT_W = 880
-        RIGHT_W = 620
+        LEFT_W = 720
+        RIGHT_W = 720
         TOP_H = 480
 
-        # ===== 上排 =====
-        game_rect = (LEFT, TOP, LEFT_W, TOP_H)
-        network_rect = (LEFT + LEFT_W + GAP, TOP, RIGHT_W, TOP_H)
+        # =========================================================
+        # 上排
+        # =========================================================
+        game_rect = (
+            LEFT,
+            TOP,
+            LEFT_W,
+            TOP_H
+        )
 
-        # ===== 中排 =====
+        network_rect = (
+            LEFT + LEFT_W + GAP,
+            TOP,
+            RIGHT_W,
+            TOP_H
+        )
+
+        # =========================================================
+        # 中排
+        # =========================================================
         mid_y = TOP + TOP_H + GAP
         mid_h = 160
 
-        # ⭐ 一定要有這行（你現在缺這個）
         timer_w = 180
-        timer_rect = (LEFT, mid_y, timer_w, mid_h)
 
-        # 小資訊
-        info_w = (LEFT_W - timer_w - GAP*2) // 2
+        timer_rect = (
+            LEFT,
+            mid_y,
+            timer_w,
+            mid_h
+        )
+
+        info_w = (LEFT_W - timer_w - GAP * 2) // 2
         info_h = (mid_h - GAP) // 2
 
         x1 = LEFT + timer_w + GAP
         x2 = x1 + info_w + GAP
 
-        info1_rect = (x1, mid_y, info_w, info_h)
-        info2_rect = (x2, mid_y, info_w, info_h)
-        info3_rect = (x1, mid_y + info_h + GAP, info_w, info_h)
-        info4_rect = (x2, mid_y + info_h + GAP, info_w, info_h)
+        info1_rect = (
+            x1,
+            mid_y,
+            info_w,
+            info_h
+        )
 
-        # ===== 下排 =====
+        info2_rect = (
+            x2,
+            mid_y,
+            info_w,
+            info_h
+        )
+
+        info3_rect = (
+            x1,
+            mid_y + info_h + GAP,
+            info_w,
+            info_h
+        )
+
+        info4_rect = (
+            x2,
+            mid_y + info_h + GAP,
+            info_w,
+            info_h
+        )
+
+        # =========================================================
+        # Timeline
+        # =========================================================
         timeline_y = mid_y + mid_h + GAP
         timeline_h = 140
 
-        timeline_rect = (LEFT, timeline_y, LEFT_W, timeline_h)
+        timeline_rect = (
+            LEFT,
+            timeline_y,
+            LEFT_W,
+            timeline_h
+        )
 
-        # ===== Current =====
+        # =========================================================
+        # Current Panel
+        # =========================================================
+        CURRENT_H = 320
+
         current_rect = (
             LEFT + LEFT_W + GAP,
             mid_y,
             RIGHT_W,
-            timeline_y + timeline_h - mid_y
-        )    
-
-        # 1️⃣ 先畫外框
-        draw_glow_rect(surface, network_rect, colors["panel"], colors["border"], 2)
-
-        # 2️⃣ 畫標題
-        surface.blit(fonts["header"].render("DRQN Network", True, colors["title"]),
-                    (network_rect[0] + 12, network_rect[1] + 10))
-
-        # 3️⃣ 畫內容
-        sub_rect = pygame.Rect(
-            network_rect[0] + 10,
-            network_rect[1] + 40,
-            network_rect[2] - 20,
-            network_rect[3] - 50
+            CURRENT_H
         )
 
+<<<<<<< HEAD
         if sub_rect.width > 0 and sub_rect.height > 0:
             sub_surface = surface.subsurface(sub_rect)
 
@@ -890,16 +974,133 @@ def main(argv):
        
         # 中間資訊
         s = get_dashboard_snapshot(obs)
-
-        draw_panel(surface, timer_rect, "Timer", fonts, colors)
-        surface.blit(
-            fonts["header"].render(format_loop_to_mmss(s["remain_loop"]), True, colors["cyan"]),
-            (timer_rect[0] + 10, timer_rect[1] + 60)
+=======
+        # =========================================================
+        # 左上 Feature Screen
+        # =========================================================
+        draw_feature_game_panel(
+            surface,
+            game_rect,
+            obs,
+            fonts,
+            colors
         )
 
-        draw_small_info(surface, info1_rect, "Marauders", s["marauders"], fonts, colors)
+        # =========================================================
+        # 右上 DRQN Network
+        # =========================================================
+        draw_glow_rect(
+            surface,
+            network_rect,
+            colors["panel"],
+            colors["border"],
+            2
+        )
 
-        # ⭐ 把 Minerals 放到 info2
+        title = fonts["header"].render(
+            "DRQN Network",
+            True,
+            colors["title"]
+        )
+>>>>>>> c9dc70bdf0e47a34893b3409588decd908bb138a
+
+        surface.blit(
+            title,
+            (
+                network_rect[0] + 12,
+                network_rect[1] + 10
+            )
+        )
+
+        # =========================================================
+        # DRQN 內容區
+        # =========================================================
+        sub_rect = pygame.Rect(
+            network_rect[0] + PAD,
+            network_rect[1] + 42,
+            network_rect[2] - PAD * 2,
+            network_rect[3] - 54
+        )
+
+        # =========================================================
+        # 安全檢查
+        # =========================================================
+        screen_rect = surface.get_rect()
+
+        if (
+            sub_rect.width > 0 and
+            sub_rect.height > 0 and
+            screen_rect.contains(sub_rect)
+        ):
+
+            # =====================================================
+            # 建立獨立 Surface（避免閃屏）
+            # =====================================================
+            sub_surface = pygame.Surface(
+                (sub_rect.width, sub_rect.height)
+            )
+
+            sub_surface.fill((10, 12, 18))
+
+            # =====================================================
+            # 畫 DRQN
+            # =====================================================
+            draw_dual_head_network(
+                sub_surface,
+                brain_model,
+                state_vector,
+                allowed_indices,
+                hidden_state
+            )
+
+            # =====================================================
+            # 貼回主畫面
+            # =====================================================
+            surface.blit(
+                sub_surface,
+                sub_rect.topleft
+            )
+
+        # =========================================================
+        # 中間資訊區
+        # =========================================================
+        draw_panel(
+            surface,
+            timer_rect,
+            "Timer",
+            fonts,
+            colors
+        )
+
+        timer_txt = fonts["header"].render(
+            format_loop_to_mmss(s["remain_loop"]),
+            True,
+            colors["cyan"]
+        )
+
+        surface.blit(
+            timer_txt,
+            (
+                timer_rect[0] + 10,
+                timer_rect[1] + 60
+            )
+        )
+
+        # =========================================================
+        # Marauders
+        # =========================================================
+        draw_small_info(
+            surface,
+            info1_rect,
+            "Marauders",
+            s["marauders"],
+            fonts,
+            colors
+        )
+
+        # =========================================================
+        # Minerals（含折線圖）
+        # =========================================================
         draw_small_info(
             surface,
             info2_rect,
@@ -911,9 +1112,21 @@ def main(argv):
             colors["cyan"]
         )
 
-        # ⭐ 把 Supply 放到 info3
-        draw_small_info(surface, info3_rect, "Supply", f"{s['food_used']}/{s['food_cap']}", fonts, colors)
+        # =========================================================
+        # Supply
+        # =========================================================
+        draw_small_info(
+            surface,
+            info3_rect,
+            "Supply",
+            f"{s['food_used']}/{s['food_cap']}",
+            fonts,
+            colors
+        )
 
+        # =========================================================
+        # Gas（含折線圖）
+        # =========================================================
         draw_small_info(
             surface,
             info4_rect,
@@ -925,14 +1138,33 @@ def main(argv):
             colors["good"]
         )
 
+        # =========================================================
+        # Current Action Panel
+        # =========================================================
+        draw_current(
+            surface,
+            current_rect,
+            probs,                 # ⭐ 真正機率
+            allowed_indices,
+            valid_actions,
+            fonts,
+            colors
+        )
 
-        # 右下決策
-        draw_current(surface, current_rect, q_values, allowed_indices, valid_actions, fonts, colors)
+        # =========================================================
+        # Timeline
+        # =========================================================
+        draw_timeline(
+            surface,
+            timeline_rect,
+            obs,
+            fonts,
+            colors
+        )
 
-
-        # 底部 timeline
-        draw_timeline(surface, timeline_rect, obs, fonts, colors)
-
+        # =========================================================
+        # 更新畫面
+        # =========================================================
         pygame.display.flip()
 
     def get_action_mask(target_obs, last_act_id=0): 
