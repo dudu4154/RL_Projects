@@ -539,13 +539,18 @@ def main(argv):
             py = int(inner.y + yy * sy)
             pygame.draw.circle(surface, colors["bad"], (px, py), 3)
 
-    def q_values_to_confidence(q_values, allowed_indices):
-        q = np.array(q_values, dtype=np.float32)
+    # train_dqn_on_top.py
 
-        # ✨ 直接對「所有」原始 Q 值進行 Softmax 轉換
-        # 移除原本的 -1e9 遮罩設定，讓被 LOCK 的動作也能參與百分比計算
-        exp_q = np.exp(q - np.max(q))
+    def q_values_to_confidence(q_values, allowed_indices, temperature=0.1): # 🌟 新增溫度參數
+        q = np.array(q_values, dtype=np.float32)
         
+        # ✨ 核心邏輯：將 Q 值除以溫度
+        # 當 temperature < 1.0，差距會被放大
+        # 當 temperature 趨近於 0，會變成「贏者全拿」
+        q = q / temperature 
+
+        # 執行 Softmax 轉換
+        exp_q = np.exp(q - np.max(q))
         return exp_q / max(np.sum(exp_q), 1e-6)
 
     def draw_bar(surface, x, y, w, h, value, fg, bg):
@@ -714,7 +719,7 @@ def main(argv):
         draw_panel(surface, rect, "Current Action Intent & Masks", fonts, colors)
 
         x, y, w, h = rect
-        conf = q_values_to_confidence(q_values, allowed_indices)
+        conf = q_values_to_confidence(q_values, allowed_indices, temperature=0.05) # 🌟 越小越差別化
 
         # 🔧 調整欄位 X 座標，徹底解決文字重疊問題
         col_action = x + 15
