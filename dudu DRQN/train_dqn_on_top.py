@@ -236,7 +236,7 @@ def main(argv):
 
     RENDER_UI = True # 總開關
     pygame.init()
-    screen = pygame.display.set_mode((1580, 860))
+    screen = pygame.display.set_mode((1600, 900))
     pygame.display.set_caption("DRQN 決策中樞 - 中文化遮罩版")
     
     # 菁英記憶：改成 List，用來做排行榜
@@ -287,7 +287,7 @@ def main(argv):
         import torch
         import pygame
 
-        SCALE = 1  # ⭐ 不要用2，會卡
+        SCALE = 1.4   # ⭐ 不要用2，會卡
         sw, sh = surface.get_size()
         hq_surface = pygame.Surface((int(sw * SCALE), int(sh * SCALE)))
 
@@ -343,7 +343,6 @@ def main(argv):
         lstm_w = model.lstm.weight_ih_l0.data.cpu().numpy()[:128, :]
         act_w = model.fc_action.weight.data.cpu().numpy()
 
-
         # ===== 畫線 =====
         for h in range(12):
             w = fc1_w[h*10]
@@ -381,7 +380,7 @@ def main(argv):
             else:
                 fill=(15,20,25); border=(50,100,150)
 
-            pygame.draw.circle(hq_surface, fill, pos, int(12*SCALE))
+            pygame.draw.circle(hq_surface, fill, pos, int(10*SCALE))
             pygame.draw.circle(hq_surface, border, pos, int(10*SCALE), 2)
 
             t = num_font.render(str(txt), True, (255,255,255))
@@ -804,16 +803,11 @@ def main(argv):
 
         LEFT = 20
         TOP = 20
-        GAP = 12
+        GAP = 10
 
-        # ====================================
-        # 9:6 黃金比例
-        # ====================================
-
-        TOP_H = 500
-
-        LEFT_W = 760
-        RIGHT_W = 760
+        LEFT_W = 880
+        RIGHT_W = 620
+        TOP_H = 480
 
         # ===== 上排 =====
         game_rect = (LEFT, TOP, LEFT_W, TOP_H)
@@ -862,10 +856,10 @@ def main(argv):
 
         # 3️⃣ 畫內容
         sub_rect = pygame.Rect(
-            network_rect[0] + 2,
-            network_rect[1] + 32,
-            network_rect[2] - 4,
-            network_rect[3] - 36
+            network_rect[0] + 10,
+            network_rect[1] + 40,
+            network_rect[2] - 20,
+            network_rect[3] - 50
         )
 
         if sub_rect.width > 0 and sub_rect.height > 0:
