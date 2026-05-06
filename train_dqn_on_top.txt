@@ -539,13 +539,18 @@ def main(argv):
             py = int(inner.y + yy * sy)
             pygame.draw.circle(surface, colors["bad"], (px, py), 3)
 
-    def q_values_to_confidence(q_values, allowed_indices):
-        q = np.array(q_values, dtype=np.float32)
+    # train_dqn_on_top.py
 
-        # ✨ 直接對「所有」原始 Q 值進行 Softmax 轉換
-        # 移除原本的 -1e9 遮罩設定，讓被 LOCK 的動作也能參與百分比計算
-        exp_q = np.exp(q - np.max(q))
+    def q_values_to_confidence(q_values, allowed_indices, temperature=0.1): # 🌟 新增溫度參數
+        q = np.array(q_values, dtype=np.float32)
         
+        # ✨ 核心邏輯：將 Q 值除以溫度
+        # 當 temperature < 1.0，差距會被放大
+        # 當 temperature 趨近於 0，會變成「贏者全拿」
+        q = q / temperature 
+
+        # 執行 Softmax 轉換
+        exp_q = np.exp(q - np.max(q))
         return exp_q / max(np.sum(exp_q), 1e-6)
 
     def draw_bar(surface, x, y, w, h, value, fg, bg):
@@ -682,11 +687,6 @@ def main(argv):
 
     def draw_small_info(surface, rect, title, value, fonts, colors, history_values=None, line_color=None):
         draw_panel(surface, rect, title, fonts, colors)
-
-        # 標題
-        
-
-        # 數字
         val_txt = fonts["header"].render(str(value), True, colors["text"])
         surface.blit(val_txt, (rect[0] + 12, rect[1] + 30))
 
@@ -714,7 +714,7 @@ def main(argv):
         draw_panel(surface, rect, "Current Action Intent & Masks", fonts, colors)
 
         x, y, w, h = rect
-        conf = q_values_to_confidence(q_values, allowed_indices)
+        conf = q_values_to_confidence(q_values, allowed_indices, temperature=0.05) # 🌟 越小越差別化
 
         # 🔧 調整欄位 X 座標，徹底解決文字重疊問題
         col_action = x + 15
@@ -746,48 +746,201 @@ def main(argv):
         order = [item[2] for item in sort_keys][:8]
 
         for rank, i in enumerate(order):
+
             act_id = valid_actions[i]
             name = ACTION_NAMES.get(act_id, f"Action {act_id}")
 
             is_open = i in allowed_indices
+
             pct = int(conf[i] * 100)
             q_val = q_values[i]
 
             yy = row_y + rank * row_h
 
-            # 交錯底色
-            bg = (16, 42, 48) if rank % 2 == 0 else (20, 50, 56)
-            pygame.draw.rect(surface, bg, (x + 10, yy - 4, w - 20, row_h))
+            # =====================================================
+            # 科技樹判斷
+            # =====================================================
 
-            text_color = colors["good"] if is_open else colors["gray"]
+            tech_ok = True
 
-            # Action
-            surface.blit(fonts["text"].render(name, True, text_color), (col_action, yy))
+            if name == "Train Marauder":
 
-            # Confidence bar
-            bar_x = col_conf
-            bar_y = yy + 4
-            bar_w = 60  # 🔧 將進度條長度縮減，配合文字長度
-            bar_h = 14
+                # 沒有科技實驗室
+                if s["techlab_count"] <= 0:
+                    tech_ok = False
 
-            pygame.draw.rect(surface, (10, 28, 32), (bar_x, bar_y, bar_w, bar_h))
-            # 即使被 LOCK，只要有算出版面機率，依然畫出進度條(灰色)
-            pygame.draw.rect(surface, text_color, (bar_x, bar_y, int(bar_w * pct / 100), bar_h))
+            elif name == "Build Factory":
 
-            # 機率與 Q 值文字
-            display_text = f"{pct:>2}% (Q: {q_val:+.4f})"
-            q_txt_surface = fonts["small"].render(display_text, True, text_color)
-            surface.blit(q_txt_surface, (bar_x + bar_w + 8, yy))
+                # 沒有兵營
+                if s["barracks_count"] <= 0:
+                    tech_ok = False
 
+            # =====================================================
+            # 資源需求
+            # =====================================================
+
+            mineral_cost = 0
+            gas_cost = 0
+
+            if name == "Build Barracks":
+                mineral_cost = 150
+
+            elif name == "Build Depot":
+                mineral_cost = 100
+
+            elif name == "Build Refinery":
+                mineral_cost = 75
+
+            elif name == "Train SCV":
+                mineral_cost = 50
+
+            elif name == "Train Marine":
+                mineral_cost = 50
+
+            elif name == "Train Marauder":
+                mineral_cost = 100
+                gas_cost = 25
+
+            elif name == "Build TechLab":
+                mineral_cost = 50
+                gas_cost = 25
+
+            # =====================================================
             # Mask Status
-            mask_text = "OPEN" if is_open else "LOCK"
-            mask_color = colors["good"] if is_open else colors["bad"]
-            surface.blit(fonts["small"].render(mask_text, True, mask_color), (col_mask, yy))
+            # =====================================================
+
+            mask_open = True
+
+            if s["minerals"] < mineral_cost:
+                mask_open = False
+
+            if s["vespene"] < gas_cost:
+                mask_open = False
+
+            # =====================================================
+            # 顯示文字
+            # =====================================================
 
             # Tech Tree
-            tech_text = "OK" if is_open else "BLOCK"
-            tech_color = colors["good"] if is_open else colors["bad"]
-            surface.blit(fonts["small"].render(tech_text, True, tech_color), (col_tech, yy))
+            tech_text = "OK" if tech_ok else "BLOCK"
+            tech_color = colors["good"] if tech_ok else colors["bad"]
+
+            # Mask
+            if mask_open:
+
+                mask_text = "OPEN"
+                mask_color = colors["good"]
+
+            else:
+
+                if s["minerals"] < mineral_cost:
+
+                    mask_text = "NO_MINERAL"
+                    mask_color = (255, 220, 80)
+
+                elif s["vespene"] < gas_cost:
+
+                    mask_text = "NO_GAS"
+                    mask_color = (255, 160, 80)
+
+                else:
+
+                    mask_text = "LOCK"
+                    mask_color = colors["bad"]
+
+            # =====================================================
+            # Action 顏色邏輯
+            # =====================================================
+
+            fully_available = (
+                mask_text == "OPEN"
+                and
+                tech_text == "OK"
+            )
+
+            text_color = (
+                colors["good"]
+                if fully_available
+                else
+                colors["gray"]
+            )
+
+            # =====================================================
+            # 背景
+            # =====================================================
+
+            bg = (16, 42, 48) if rank % 2 == 0 else (20, 50, 56)
+
+            pygame.draw.rect(
+                surface,
+                bg,
+                (x + 10, yy - 4, w - 20, row_h)
+            )
+
+            # =====================================================
+            # Action 名稱
+            # =====================================================
+
+            surface.blit(
+                fonts["text"].render(name, True, text_color),
+                (col_action, yy)
+            )
+
+            # =====================================================
+            # Confidence Bar
+            # =====================================================
+
+            bar_x = col_conf
+            bar_y = yy + 4
+            bar_w = 60
+            bar_h = 14
+
+            pygame.draw.rect(
+                surface,
+                (10, 28, 32),
+                (bar_x, bar_y, bar_w, bar_h)
+            )
+
+            pygame.draw.rect(
+                surface,
+                text_color,
+                (bar_x, bar_y, int(bar_w * pct / 100), bar_h)
+            )
+
+            # =====================================================
+            # 機率 + Q值
+            # =====================================================
+
+            display_text = f"{pct:>2}% (Q: {q_val:+.4f})"
+
+            q_txt_surface = fonts["small"].render(
+                display_text,
+                True,
+                text_color
+            )
+
+            surface.blit(
+                q_txt_surface,
+                (bar_x + bar_w + 8, yy)
+            )
+
+            # =====================================================
+            # Mask Status
+            # =====================================================
+
+            surface.blit(
+                fonts["small"].render(mask_text, True, mask_color),
+                (col_mask, yy)
+            )
+
+            # =====================================================
+            # Tech Tree
+            # =====================================================
+
+            surface.blit(
+                fonts["small"].render(tech_text, True, tech_color),
+                (col_tech, yy)
+            )
 
     # ✨ 修正 1：多加一個 q_values 參數，並刪除內部的神經網路推論
     def draw_full_hud(surface, obs, brain_model, state_vector, allowed_indices, hidden_state, valid_actions, q_values):
@@ -1407,12 +1560,22 @@ def main(argv):
                 # 2. 掠奪者產量追蹤 (不直接給分，用於終局結算)
 
                 # 替換為以下邏輯：
-                if current_real_count > getattr(agent, 'last_target_count', 0):
-                    # 計算增加了幾隻 (通常是一次加一隻)
-                    diff = current_real_count - agent.last_target_count
+                # train_dqn_on_top.py (約 1410 行處)
+
+                # 1. 先取出舊的數量，如果沒有就預設為 0
+                # train_dqn_on_top.py (約 1410 行處)
+
+                # 1. 先取出舊的數量，如果沒有就預設為 0
+                prev_count = getattr(agent, 'last_target_count', 0)
+
+                # 2. 進行比較
+                if current_real_count > prev_count:
+                    # 3. 使用剛剛取出的局部變數 prev_count 進行減法，避免 AttributeError
+                    diff = current_real_count - prev_count
+                    
+                    # 4. 更新 agent 的屬性 (這行會自動幫 agent 創立或更新該屬性)
                     agent.last_target_count = current_real_count
                     
-                    # 每生出一隻，給予即時大獎勵
                     step_reward += 0.5 * diff 
                     print(f"🎯 掠奪者產出！目前進度: {current_real_count}/5, 即時加分 +{0.5 * diff}")
 

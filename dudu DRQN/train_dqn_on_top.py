@@ -687,11 +687,6 @@ def main(argv):
 
     def draw_small_info(surface, rect, title, value, fonts, colors, history_values=None, line_color=None):
         draw_panel(surface, rect, title, fonts, colors)
-
-        # 標題
-        
-
-        # 數字
         val_txt = fonts["header"].render(str(value), True, colors["text"])
         surface.blit(val_txt, (rect[0] + 12, rect[1] + 30))
 
@@ -715,16 +710,18 @@ def main(argv):
 
             pygame.draw.lines(surface, line_color or colors["cyan"], False, pts, 2)
 
-    def draw_current(surface, rect, q_values, allowed_indices, valid_actions, fonts, colors):
+    def draw_current(surface, rect, q_values, allowed_indices, valid_actions, fonts, colors, obs):
         draw_panel(surface, rect, "Current Action Intent & Masks", fonts, colors)
 
-        x, y, w, h = rect
-        conf = q_values_to_confidence(q_values, allowed_indices, temperature=0.05) # 🌟 越小越差別化
+        # 1. 取得當前的資源與狀態
+        s = get_dashboard_snapshot(obs)
 
-        # 🔧 調整欄位 X 座標，徹底解決文字重疊問題
+        x, y, w, h = rect
+        conf = q_values_to_confidence(q_values, allowed_indices, temperature=0.05)
+
         col_action = x + 15
-        col_conf   = x + 175  # 往左移一點
-        col_mask   = x + 410  # 大幅往右移，讓出空間給 Q值 文字
+        col_conf   = x + 175
+        col_mask   = x + 410
         col_tech   = x + 510
 
         header_y = y + 30
@@ -737,62 +734,128 @@ def main(argv):
         surface.blit(fonts["header"].render("Mask Status", True, colors["text"]), (col_mask, header_y))
         surface.blit(fonts["header"].render("Tech-Tree", True, colors["text"]), (col_tech, header_y))
 
-        # ✨ 全新排序邏輯：優先排 "OPEN" (可以做的)，然後才按機率高低排序
-        sort_keys = []
-        for i in range(len(valid_actions)):
-            is_open = i in allowed_indices
-            # 將 (是否合法, 機率, 原始索引) 打包
-            sort_keys.append((is_open, conf[i], i))
-            
-        # 進行排序：優先比對 is_open (True 優先於 False)，再比對 conf (機率高優先)
-        sort_keys.sort(key=lambda item: (item[0], item[1]), reverse=True)
-        
-        # 取出前 8 名排序好的動作索引
-        order = [item[2] for item in sort_keys][:8]
+        # =====================================================
+        # ✨ 第一步：先收集所有動作的狀態與資源需求
+        # =====================================================
+        action_data_list = []
 
-        for rank, i in enumerate(order):
+        for i in range(len(valid_actions)):
             act_id = valid_actions[i]
             name = ACTION_NAMES.get(act_id, f"Action {act_id}")
-
-            is_open = i in allowed_indices
             pct = int(conf[i] * 100)
             q_val = q_values[i]
 
-            yy = row_y + rank * row_h
+            # 1. 科技樹判斷 (注意這裡已經修正為正確的 key)
+            tech_ok = True
+            if name == "Train Marauder":
+                if s["techlabs"] <= 0: tech_ok = False
+            elif name == "Build Factory":
+                if s["barracks"] <= 0: tech_ok = False
 
-            # 交錯底色
+            # 2. 資源需求判斷
+            mineral_cost = 0
+            gas_cost = 0
+
+            if name == "Build Barracks": mineral_cost = 150
+            elif name == "Build Depot": mineral_cost = 100
+            elif name == "Build Refinery": mineral_cost = 75
+            elif name == "Train SCV": mineral_cost = 50
+            elif name == "Train Marine": mineral_cost = 50
+            elif name == "Train Marauder": mineral_cost = 100; gas_cost = 25
+            elif name == "Build TechLab": mineral_cost = 50; gas_cost = 25
+
+            # 3. Mask Status 狀態判斷
+            mask_open = True
+            if s["minerals"] < mineral_cost: mask_open = False
+            if s["vespene"] < gas_cost: mask_open = False
+            
+            # 如果底層神經網路判斷不合法，也要視為 BLOCK
+            if i not in allowed_indices: mask_open = False 
+
+            # 4. 決定顯示文字與顏色
+            tech_text = "OK" if tech_ok else "BLOCK"
+            tech_color = colors["good"] if tech_ok else colors["bad"]
+
+            if mask_open:
+                mask_text = "OPEN"
+                mask_color = colors["good"]
+            else:
+                if s["minerals"] < mineral_cost:
+                    mask_text = "NO_MINERAL"
+                    mask_color = (255, 220, 80)
+                elif s["vespene"] < gas_cost:
+                    mask_text = "NO_GAS"
+                    mask_color = (255, 160, 80)
+                else:
+                    mask_text = "LOCK"
+                    mask_color = colors["bad"]
+
+            # 綜合判斷：是否「完全」可以執行
+            # ... 前面的資源與 Mask 判斷維持不變 ...
+
+            # 綜合判斷：是否「完全」可以執行
+            fully_available = (mask_text == "OPEN" and tech_text == "OK")
+
+            # =====================================================
+            # ✨ 新增：定義顏色排序權重 (數字越大，排得越高)
+            # =====================================================
+            sort_priority = 1  # 預設為 1 (灰色/紅色：完全無法執行、BLOCK、LOCK)
+            
+            if fully_available:
+                sort_priority = 3  # 綠色為 3 (排第一：資源科技都OK)
+            elif tech_ok and mask_text in ["NO_MINERAL", "NO_GAS"]:
+                sort_priority = 2  # 黃色為 2 (排第二：科技有到位，只是單純缺錢缺瓦斯)
+
+            # 將所有算好的資料打包進字典
+            action_data_list.append({
+                "name": name,
+                "fully_available": fully_available,
+                "sort_priority": sort_priority, # ✨ 把權重存進來
+                "conf": conf[i],
+                "pct": pct,
+                "q_val": q_val,
+                "tech_text": tech_text,
+                "tech_color": tech_color,
+                "mask_text": mask_text,
+                "mask_color": mask_color,
+                "text_color": colors["good"] if fully_available else colors["gray"]
+            })
+
+        # =====================================================
+        # ✨ 第二步：執行排序 (優先排可以執行的，然後按機率高低)
+        # =====================================================
+        action_data_list.sort(key=lambda item: (item["sort_priority"], item["conf"]), reverse=True)
+
+        # =====================================================
+        # ✨ 第三步：依序將前 8 名渲染到畫面上
+        # =====================================================
+        for rank, data in enumerate(action_data_list[:8]):
+            yy = row_y + rank * row_h
             bg = (16, 42, 48) if rank % 2 == 0 else (20, 50, 56)
+
             pygame.draw.rect(surface, bg, (x + 10, yy - 4, w - 20, row_h))
 
-            text_color = colors["good"] if is_open else colors["gray"]
+            # Action 名稱
+            surface.blit(fonts["text"].render(data["name"], True, data["text_color"]), (col_action, yy))
 
-            # Action
-            surface.blit(fonts["text"].render(name, True, text_color), (col_action, yy))
-
-            # Confidence bar
+            # Confidence Bar
             bar_x = col_conf
             bar_y = yy + 4
-            bar_w = 60  # 🔧 將進度條長度縮減，配合文字長度
+            bar_w = 60
             bar_h = 14
 
             pygame.draw.rect(surface, (10, 28, 32), (bar_x, bar_y, bar_w, bar_h))
-            # 即使被 LOCK，只要有算出版面機率，依然畫出進度條(灰色)
-            pygame.draw.rect(surface, text_color, (bar_x, bar_y, int(bar_w * pct / 100), bar_h))
+            pygame.draw.rect(surface, data["text_color"], (bar_x, bar_y, int(bar_w * data["pct"] / 100), bar_h))
 
-            # 機率與 Q 值文字
-            display_text = f"{pct:>2}% (Q: {q_val:+.4f})"
-            q_txt_surface = fonts["small"].render(display_text, True, text_color)
-            surface.blit(q_txt_surface, (bar_x + bar_w + 8, yy))
+            # 機率與 Q值
+            display_text = f"{data['pct']:>2}% (Q: {data['q_val']:+.4f})"
+            surface.blit(fonts["small"].render(display_text, True, data["text_color"]), (bar_x + bar_w + 8, yy))
 
             # Mask Status
-            mask_text = "OPEN" if is_open else "LOCK"
-            mask_color = colors["good"] if is_open else colors["bad"]
-            surface.blit(fonts["small"].render(mask_text, True, mask_color), (col_mask, yy))
+            surface.blit(fonts["small"].render(data["mask_text"], True, data["mask_color"]), (col_mask, yy))
 
             # Tech Tree
-            tech_text = "OK" if is_open else "BLOCK"
-            tech_color = colors["good"] if is_open else colors["bad"]
-            surface.blit(fonts["small"].render(tech_text, True, tech_color), (col_tech, yy))
+            surface.blit(fonts["small"].render(data["tech_text"], True, data["tech_color"]), (col_tech, yy))
 
     # ✨ 修正 1：多加一個 q_values 參數，並刪除內部的神經網路推論
     def draw_full_hud(surface, obs, brain_model, state_vector, allowed_indices, hidden_state, valid_actions, q_values):
@@ -923,7 +986,7 @@ def main(argv):
 
 
         # 右下決策
-        draw_current(surface, current_rect, q_values, allowed_indices, valid_actions, fonts, colors)
+        draw_current(surface, current_rect, q_values, allowed_indices, valid_actions, fonts, colors, obs)
 
 
         # 底部 timeline
@@ -1684,13 +1747,31 @@ def main(argv):
                     # 只壓縮用於顯示的分數，不影響任何訓練邏輯
                     
 
+                    # 4. 寫入 CSV 紀錄
+                    # 只壓縮用於顯示的分數，不影響任何訓練邏輯
+
                     print(f"!!! 即將寫入 CSV 的分數是: {final_reward} (型別: {type(final_reward)})")
-                    #logger.log_episode(ep + 1, "掠奪者任務", epsilon, float(episode_reward), current_loop, current_real_count, marine_count)
-                    #log_file = f"d:/RL_Projects/dudu DRQN/log/dqn_training_log_{int(time.time())}.csv"
                     with open(current_session_file, "a", encoding="utf-8") as f:
                         line = f"{ep+1},掠奪者任務,{epsilon:.3f},{final_reward:.4f},{current_loop},{current_real_count},{marine_count}\n"
                         f.write(line)
                     print(f"✅ 已手動強制寫入 CSV: {final_reward:.4f}")
+
+                    # =====================================================
+                    # ✨ 新增：在遊戲結束跳出前，強制「同步最後一幀畫面」
+                    # =====================================================
+                    if RENDER_UI:
+                        current_q_vals = q_actions.cpu().detach().numpy()[0]
+                        
+                        # ⚠️ 關鍵：這裡傳入的是 next_obs 和 next_state，這樣 UI 才會抓到第 5 隻掠奪者
+                        draw_full_hud(
+                            screen, next_obs, brain_model, next_state,
+                            next_allowed_indices, hidden_state, VALID_ACTIONS, current_q_vals
+                        )
+                        pygame.display.flip()  # 強制刷新螢幕更新
+                        
+                        # 暫停 1.5 秒 (1500 毫秒)，讓你看清楚 Target(5) 亮起，再重置遊戲
+                        pygame.time.wait(1500) 
+
                     break # ✨ 記得加上 break 跳出 while 迴圈
 
                 state = next_state
