@@ -548,13 +548,11 @@ def main(argv):
 
     def q_values_to_confidence(q_values, allowed_indices):
         q = np.array(q_values, dtype=np.float32)
-        masked = np.full_like(q, -1e9)
 
-        for idx in allowed_indices:
-            if 0 <= idx < len(q):
-                masked[idx] = q[idx]
-
-        exp_q = np.exp(masked - np.max(masked))
+        # ✨ 直接對「所有」原始 Q 值進行 Softmax 轉換
+        # 移除原本的 -1e9 遮罩設定，讓被 LOCK 的動作也能參與百分比計算
+        exp_q = np.exp(q - np.max(q))
+        
         return exp_q / max(np.sum(exp_q), 1e-6)
 
     def draw_bar(surface, x, y, w, h, value, fg, bg):
@@ -725,11 +723,11 @@ def main(argv):
         x, y, w, h = rect
         conf = q_values_to_confidence(q_values, allowed_indices)
 
-        # 欄位位置
-        col_action = x + 18
-        col_conf   = x + 210
-        col_mask   = x + 380
-        col_tech   = x + 500
+        # 🔧 調整欄位 X 座標，徹底解決文字重疊問題
+        col_action = x + 15
+        col_conf   = x + 175  # 往左移一點
+        col_mask   = x + 410  # 大幅往右移，讓出空間給 Q值 文字
+        col_tech   = x + 510
 
         header_y = y + 30
         row_y = y + 65
@@ -737,12 +735,22 @@ def main(argv):
 
         # 表頭
         surface.blit(fonts["header"].render("Action", True, colors["text"]), (col_action, header_y))
-        surface.blit(fonts["header"].render("Confidence", True, colors["text"]), (col_conf, header_y))
+        surface.blit(fonts["header"].render("Probability & Q-Value", True, colors["cyan"]), (col_conf, header_y))
         surface.blit(fonts["header"].render("Mask Status", True, colors["text"]), (col_mask, header_y))
         surface.blit(fonts["header"].render("Tech-Tree", True, colors["text"]), (col_tech, header_y))
 
-        # 只顯示前 5 個最高信心動作
-        order = np.argsort(conf)[::-1][:8]
+        # ✨ 全新排序邏輯：優先排 "OPEN" (可以做的)，然後才按機率高低排序
+        sort_keys = []
+        for i in range(len(valid_actions)):
+            is_open = i in allowed_indices
+            # 將 (是否合法, 機率, 原始索引) 打包
+            sort_keys.append((is_open, conf[i], i))
+            
+        # 進行排序：優先比對 is_open (True 優先於 False)，再比對 conf (機率高優先)
+        sort_keys.sort(key=lambda item: (item[0], item[1]), reverse=True)
+        
+        # 取出前 8 名排序好的動作索引
+        order = [item[2] for item in sort_keys][:8]
 
         for rank, i in enumerate(order):
             act_id = valid_actions[i]
@@ -750,6 +758,7 @@ def main(argv):
 
             is_open = i in allowed_indices
             pct = int(conf[i] * 100)
+            q_val = q_values[i]
 
             yy = row_y + rank * row_h
 
@@ -765,14 +774,17 @@ def main(argv):
             # Confidence bar
             bar_x = col_conf
             bar_y = yy + 4
-            bar_w = 120
+            bar_w = 60  # 🔧 將進度條長度縮減，配合文字長度
             bar_h = 14
 
             pygame.draw.rect(surface, (10, 28, 32), (bar_x, bar_y, bar_w, bar_h))
-            pygame.draw.rect(surface, colors["good"], (bar_x, bar_y, int(bar_w * pct / 100), bar_h))
+            # 即使被 LOCK，只要有算出版面機率，依然畫出進度條(灰色)
+            pygame.draw.rect(surface, text_color, (bar_x, bar_y, int(bar_w * pct / 100), bar_h))
 
-            pct_txt = fonts["small"].render(f"{pct}%", True, text_color)
-            surface.blit(pct_txt, (bar_x + bar_w + 8, yy))
+            # 機率與 Q 值文字
+            display_text = f"{pct:>2}% (Q: {q_val:+.4f})"
+            q_txt_surface = fonts["small"].render(display_text, True, text_color)
+            surface.blit(q_txt_surface, (bar_x + bar_w + 8, yy))
 
             # Mask Status
             mask_text = "OPEN" if is_open else "LOCK"
@@ -871,25 +883,7 @@ def main(argv):
                 hidden_state
             )
 
-        # ⭐ 建立子畫面區域
-        sub_rect = pygame.Rect(
-            network_rect[0] + 10,
-            network_rect[1] + 40,
-            network_rect[2] - 20,
-            network_rect[3] - 50
-        )
-
-        if sub_rect.width > 0 and sub_rect.height > 0:
-            sub_surface = surface.subsurface(sub_rect)
-
-            # ⭐ 直接畫進 sub_surface（不用 temp_surface）
-            draw_dual_head_network(
-                sub_surface,
-                brain_model,
-                state_vector,
-                allowed_indices,
-                hidden_state
-            )
+        
             
         # 左上
         draw_feature_game_panel(surface, game_rect, obs, fonts, colors)
@@ -1330,25 +1324,20 @@ def main(argv):
 
                 # ... 在你的訓練迴圈內 ...
 
-                if RENDER_UI and train_step_counter % 5 == 0:   # ⭐ 降頻
-
+                if RENDER_UI:
+                    # 每一幀都要處理事件，防止系統判定視窗無回應
                     for event in pygame.event.get():
                         if event.type == pygame.QUIT:
                             pygame.quit()
                             return
-
-                    draw_full_hud(
-                        screen,
-                        obs,
-                        brain_model,
-                        state,
-                        allowed_indices,
-                        hidden_state,
-                        VALID_ACTIONS
-                    )
-
-                    # 執行原本的繪圖                    
-                    pygame.display.flip()
+                            
+                    # 只有繪圖才降頻
+                    if train_step_counter % 5 == 0:
+                        draw_full_hud(
+                            screen, obs, brain_model, state,
+                            allowed_indices, hidden_state, VALID_ACTIONS
+                        )
+                        pygame.display.flip()
 
                 # ==========================================
                 # ✨ 核心修正：判斷動作是否「真的」被遊戲接受
