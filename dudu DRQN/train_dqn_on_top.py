@@ -1232,7 +1232,9 @@ def main(argv):
         agent_interface_format=sc2_env.AgentInterfaceFormat(
             feature_dimensions=sc2_env.Dimensions(screen=84, minimap=64), use_raw_units=False),
         step_mul=16, realtime=False
+        
     ) as env:
+        
         
         current_session_file = os.path.join(log_dir, f"dqn_training_log_{int(time.time())}.csv")
         with open(current_session_file, "w", encoding="utf-8") as f:
