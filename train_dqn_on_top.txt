@@ -254,7 +254,7 @@ def main(argv):
     else:
         success_memory = []
         
-    MAX_ELITE_MEMORY = 1000
+    MAX_ELITE_MEMORY = 50
 
     gamma = 0.99
     logger = TrainingLogger() # 使用 TrainingLogger 紀錄產量
@@ -487,14 +487,16 @@ def main(argv):
             "food_used": int(player.food_used),
             "food_cap": int(player.food_cap),
             "idle_workers": int(player.idle_worker_count),
-            "depots": count_units_from_screen(obs, 19, 69.0),
-            "refineries": count_units_from_screen(obs, 20, 97.0),
-            "barracks": count_units_from_screen(obs, 21, 137.0),
-            "techlabs": count_units_from_screen(obs, 37, 85.0),
-            "marines": count_units_from_screen(obs, 48, 10.0),
-            "marauders": count_units_from_screen(obs, 51, 10.0),
             "loop": current_loop,
             "remain_loop": max(0, 13440 - current_loop),
+            
+            # ✨ 全部改讀取全域追蹤器的最高紀錄，UI 再也不會閃爍了！
+            "depots": SESSION_TRACKER["depots"],
+            "barracks": SESSION_TRACKER["barracks"],
+            "refineries": SESSION_TRACKER["refineries"],
+            "techlabs": SESSION_TRACKER["techlabs"],
+            "marines": SESSION_TRACKER["marines"],
+            "marauders": SESSION_TRACKER["marauders"],
         }
 
     def format_loop_to_mmss(loop_value):
@@ -710,17 +712,20 @@ def main(argv):
 
             pygame.draw.lines(surface, line_color or colors["cyan"], False, pts, 2)
 
-    def draw_current(surface, rect, q_values, allowed_indices, valid_actions, fonts, colors):
+    def draw_current(surface, rect, q_values, allowed_indices, valid_actions, fonts, colors, obs):
         draw_panel(surface, rect, "Current Action Intent & Masks", fonts, colors)
 
-        x, y, w, h = rect
-        conf = q_values_to_confidence(q_values, allowed_indices, temperature=0.05) # 🌟 越小越差別化
+        # 1. 取得當前的資源與狀態
+        s = get_dashboard_snapshot(obs)
 
-        # 🔧 調整欄位 X 座標，徹底解決文字重疊問題
+        x, y, w, h = rect
+        conf = q_values_to_confidence(q_values, allowed_indices, temperature=0.05)
+
+        
         col_action = x + 15
-        col_conf   = x + 175  # 往左移一點
-        col_mask   = x + 410  # 大幅往右移，讓出空間給 Q值 文字
-        col_tech   = x + 510
+        col_conf   = x + 165  # 稍微往左收一點
+        col_mask   = x + 385  # 往左移，挪出空間給長文字
+        col_tech   = x + 520  # 往右移，徹底拉開與 Mask Status 的距離
 
         header_y = y + 30
         row_y = y + 65
@@ -732,215 +737,128 @@ def main(argv):
         surface.blit(fonts["header"].render("Mask Status", True, colors["text"]), (col_mask, header_y))
         surface.blit(fonts["header"].render("Tech-Tree", True, colors["text"]), (col_tech, header_y))
 
-        # ✨ 全新排序邏輯：優先排 "OPEN" (可以做的)，然後才按機率高低排序
-        sort_keys = []
+        # =====================================================
+        # ✨ 第一步：先收集所有動作的狀態與資源需求
+        # =====================================================
+        action_data_list = []
+
         for i in range(len(valid_actions)):
-            is_open = i in allowed_indices
-            # 將 (是否合法, 機率, 原始索引) 打包
-            sort_keys.append((is_open, conf[i], i))
-            
-        # 進行排序：優先比對 is_open (True 優先於 False)，再比對 conf (機率高優先)
-        sort_keys.sort(key=lambda item: (item[0], item[1]), reverse=True)
-        
-        # 取出前 8 名排序好的動作索引
-        order = [item[2] for item in sort_keys][:8]
-
-        for rank, i in enumerate(order):
-
             act_id = valid_actions[i]
             name = ACTION_NAMES.get(act_id, f"Action {act_id}")
-
-            is_open = i in allowed_indices
-
             pct = int(conf[i] * 100)
             q_val = q_values[i]
 
-            yy = row_y + rank * row_h
-
-            # =====================================================
-            # 科技樹判斷
-            # =====================================================
-
+            # 1. 科技樹判斷 (注意這裡已經修正為正確的 key)
             tech_ok = True
-
             if name == "Train Marauder":
-
-                # 沒有科技實驗室
-                if s["techlab_count"] <= 0:
-                    tech_ok = False
-
+                if s["techlabs"] <= 0: tech_ok = False
             elif name == "Build Factory":
+                if s["barracks"] <= 0: tech_ok = False
 
-                # 沒有兵營
-                if s["barracks_count"] <= 0:
-                    tech_ok = False
-
-            # =====================================================
-            # 資源需求
-            # =====================================================
-
+            # 2. 資源需求判斷
             mineral_cost = 0
             gas_cost = 0
 
-            if name == "Build Barracks":
-                mineral_cost = 150
+            if name == "Build Barracks": mineral_cost = 150
+            elif name == "Build Depot": mineral_cost = 100
+            elif name == "Build Refinery": mineral_cost = 75
+            elif name == "Train SCV": mineral_cost = 50
+            elif name == "Train Marine": mineral_cost = 50
+            elif name == "Train Marauder": mineral_cost = 100; gas_cost = 25
+            elif name == "Build TechLab": mineral_cost = 50; gas_cost = 25
 
-            elif name == "Build Depot":
-                mineral_cost = 100
-
-            elif name == "Build Refinery":
-                mineral_cost = 75
-
-            elif name == "Train SCV":
-                mineral_cost = 50
-
-            elif name == "Train Marine":
-                mineral_cost = 50
-
-            elif name == "Train Marauder":
-                mineral_cost = 100
-                gas_cost = 25
-
-            elif name == "Build TechLab":
-                mineral_cost = 50
-                gas_cost = 25
-
-            # =====================================================
-            # Mask Status
-            # =====================================================
-
+            # 3. Mask Status 狀態判斷
             mask_open = True
+            if s["minerals"] < mineral_cost: mask_open = False
+            if s["vespene"] < gas_cost: mask_open = False
+            
+            # 如果底層神經網路判斷不合法，也要視為 BLOCK
+            if i not in allowed_indices: mask_open = False 
 
-            if s["minerals"] < mineral_cost:
-                mask_open = False
-
-            if s["vespene"] < gas_cost:
-                mask_open = False
-
-            # =====================================================
-            # 顯示文字
-            # =====================================================
-
-            # Tech Tree
+            # 4. 決定顯示文字與顏色
             tech_text = "OK" if tech_ok else "BLOCK"
             tech_color = colors["good"] if tech_ok else colors["bad"]
 
-            # Mask
             if mask_open:
-
                 mask_text = "OPEN"
                 mask_color = colors["good"]
-
             else:
-
                 if s["minerals"] < mineral_cost:
-
                     mask_text = "NO_MINERAL"
                     mask_color = (255, 220, 80)
-
                 elif s["vespene"] < gas_cost:
-
                     mask_text = "NO_GAS"
                     mask_color = (255, 160, 80)
-
                 else:
-
                     mask_text = "LOCK"
                     mask_color = colors["bad"]
 
-            # =====================================================
-            # Action 顏色邏輯
-            # =====================================================
+            # 綜合判斷：是否「完全」可以執行
+            # ... 前面的資源與 Mask 判斷維持不變 ...
 
-            fully_available = (
-                mask_text == "OPEN"
-                and
-                tech_text == "OK"
-            )
-
-            text_color = (
-                colors["good"]
-                if fully_available
-                else
-                colors["gray"]
-            )
+            # 綜合判斷：是否「完全」可以執行
+            fully_available = (mask_text == "OPEN" and tech_text == "OK")
 
             # =====================================================
-            # 背景
+            # ✨ 新增：定義顏色排序權重 (數字越大，排得越高)
             # =====================================================
+            sort_priority = 1  # 預設為 1 (灰色/紅色：完全無法執行、BLOCK、LOCK)
+            
+            if fully_available:
+                sort_priority = 3  # 綠色為 3 (排第一：資源科技都OK)
+            elif tech_ok and mask_text in ["NO_MINERAL", "NO_GAS"]:
+                sort_priority = 2  # 黃色為 2 (排第二：科技有到位，只是單純缺錢缺瓦斯)
 
+            # 將所有算好的資料打包進字典
+            action_data_list.append({
+                "name": name,
+                "fully_available": fully_available,
+                "sort_priority": sort_priority, # ✨ 把權重存進來
+                "conf": conf[i],
+                "pct": pct,
+                "q_val": q_val,
+                "tech_text": tech_text,
+                "tech_color": tech_color,
+                "mask_text": mask_text,
+                "mask_color": mask_color,
+                "text_color": colors["good"] if fully_available else colors["gray"]
+            })
+
+        # =====================================================
+        # ✨ 第二步：執行排序 (優先排可以執行的，然後按機率高低)
+        # =====================================================
+        action_data_list.sort(key=lambda item: (item["sort_priority"], item["conf"]), reverse=True)
+
+        # =====================================================
+        # ✨ 第三步：依序將前 8 名渲染到畫面上
+        # =====================================================
+        for rank, data in enumerate(action_data_list[:8]):
+            yy = row_y + rank * row_h
             bg = (16, 42, 48) if rank % 2 == 0 else (20, 50, 56)
 
-            pygame.draw.rect(
-                surface,
-                bg,
-                (x + 10, yy - 4, w - 20, row_h)
-            )
+            pygame.draw.rect(surface, bg, (x + 10, yy - 4, w - 20, row_h))
 
-            # =====================================================
             # Action 名稱
-            # =====================================================
+            surface.blit(fonts["text"].render(data["name"], True, data["text_color"]), (col_action, yy))
 
-            surface.blit(
-                fonts["text"].render(name, True, text_color),
-                (col_action, yy)
-            )
-
-            # =====================================================
             # Confidence Bar
-            # =====================================================
-
             bar_x = col_conf
             bar_y = yy + 4
             bar_w = 60
             bar_h = 14
 
-            pygame.draw.rect(
-                surface,
-                (10, 28, 32),
-                (bar_x, bar_y, bar_w, bar_h)
-            )
+            pygame.draw.rect(surface, (10, 28, 32), (bar_x, bar_y, bar_w, bar_h))
+            pygame.draw.rect(surface, data["text_color"], (bar_x, bar_y, int(bar_w * data["pct"] / 100), bar_h))
 
-            pygame.draw.rect(
-                surface,
-                text_color,
-                (bar_x, bar_y, int(bar_w * pct / 100), bar_h)
-            )
+            # 機率與 Q值
+            display_text = f"{data['pct']:>2}% (Q: {data['q_val']:+.4f})"
+            surface.blit(fonts["small"].render(display_text, True, data["text_color"]), (bar_x + bar_w + 8, yy))
 
-            # =====================================================
-            # 機率 + Q值
-            # =====================================================
-
-            display_text = f"{pct:>2}% (Q: {q_val:+.4f})"
-
-            q_txt_surface = fonts["small"].render(
-                display_text,
-                True,
-                text_color
-            )
-
-            surface.blit(
-                q_txt_surface,
-                (bar_x + bar_w + 8, yy)
-            )
-
-            # =====================================================
             # Mask Status
-            # =====================================================
+            surface.blit(fonts["small"].render(data["mask_text"], True, data["mask_color"]), (col_mask, yy))
 
-            surface.blit(
-                fonts["small"].render(mask_text, True, mask_color),
-                (col_mask, yy)
-            )
-
-            # =====================================================
             # Tech Tree
-            # =====================================================
-
-            surface.blit(
-                fonts["small"].render(tech_text, True, tech_color),
-                (col_tech, yy)
-            )
+            surface.blit(fonts["small"].render(data["tech_text"], True, data["tech_color"]), (col_tech, yy))
 
     # ✨ 修正 1：多加一個 q_values 參數，並刪除內部的神經網路推論
     def draw_full_hud(surface, obs, brain_model, state_vector, allowed_indices, hidden_state, valid_actions, q_values):
@@ -1071,7 +989,7 @@ def main(argv):
 
 
         # 右下決策
-        draw_current(surface, current_rect, q_values, allowed_indices, valid_actions, fonts, colors)
+        draw_current(surface, current_rect, q_values, allowed_indices, valid_actions, fonts, colors, obs)
 
 
         # 底部 timeline
@@ -1082,6 +1000,14 @@ def main(argv):
     def get_action_mask(target_obs, last_act_id=0): 
         """ 根據當前畫面狀態，回傳合法的 Action 索引列表 """
         player = target_obs.observation.player
+        
+        # ✨ 直接調用全域記憶，AI 切走視角也不會忘記自己蓋過什麼科技了！
+        barracks = SESSION_TRACKER["barracks"]
+        refineries = SESSION_TRACKER["refineries"]
+        techlabs = SESSION_TRACKER["techlabs"]
+        depots = SESSION_TRACKER["depots"]
+        
+        # (下方的 allowed_acts 判斷維持原樣...)
         s_unit = target_obs.observation.feature_screen.unit_type
         s_player = target_obs.observation.feature_screen.player_relative
         workers = int(player.food_workers)
@@ -1251,7 +1177,7 @@ def main(argv):
 
     # ✨ 全新路線：解除星海視窗鎖定，改為可用滑鼠自由縮放的正常視窗
    # ✨ 全新路線：保持視窗模式，並由程式自動精準校正大小
-    def resize_sc2_to_grid():
+    '''def resize_sc2_to_grid():
         import ctypes
         import time
 
@@ -1291,10 +1217,10 @@ def main(argv):
                 ctypes.windll.user32.SetWindowPos(hwnd, 0, 0, 0, final_w, final_h, 0x0002 | 0x0004)
                 
                 print(f"✅ 星海畫面已精準設定為 {target_w}x{target_h}！你可以抓著標題列自由拖曳了！")
-                break
+                break'''
 
     # 🚀 在啟動星海前，派執行緒去背景等待校正
-    threading.Thread(target=resize_sc2_to_grid, daemon=True).start()
+    #threading.Thread(target=resize_sc2_to_grid, daemon=True).start()
 
     # 原本啟動環境的程式碼保持不動
     with sc2_env.SC2Env(
@@ -1321,11 +1247,22 @@ def main(argv):
                 # --- 修正 1：初始化歷史最低時間紀錄 ---
 
 
-        for ep in range(10000):
+        # ✨ 建立全域視野追蹤器 (放在 for 迴圈外面)
+        SESSION_TRACKER = {
+            "depots": 0, "barracks": 0, "refineries": 0, 
+            "techlabs": 0, "marines": 0, "marauders": 0
+        }
 
+        for ep in range(10000):
             agent = ProductionAI()
             obs_list = env.reset()
             obs = obs_list[0]
+            
+            # ✨ 每一局開始時，清空記憶
+            for key in SESSION_TRACKER:
+                SESSION_TRACKER[key] = 0
+                
+            # ... (下方保持原樣)
             
             episode_memory = []  
             # ✨ 1. N-Step 新增：準備一個長度為 3 的滑動視窗
@@ -1400,8 +1337,17 @@ def main(argv):
                 techlab_pixels = np.sum((s_unit == 37) & (s_player == 1))
                 current_techlabs = int(np.round(techlab_pixels / 85.0)) # 真實科技室數
                 # 👇 新增：計算補給站數量 (防呆用)
+                # 👇 新增：計算補給站數量 (防呆用)
                 depot_pixels = np.sum((s_unit == 19) & (s_player == 1))
                 current_depots = int(np.round(depot_pixels / 69.0))
+                
+                # =====================================================
+                # ✨ 同步更新全域最高紀錄 (使用 max 確保數量不會因為切視角而歸零)
+                # =====================================================
+                SESSION_TRACKER["depots"] = max(SESSION_TRACKER["depots"], current_depots)
+                SESSION_TRACKER["barracks"] = max(SESSION_TRACKER["barracks"], current_barracks)
+                SESSION_TRACKER["refineries"] = max(SESSION_TRACKER["refineries"], current_refineries)
+                SESSION_TRACKER["techlabs"] = max(SESSION_TRACKER["techlabs"], current_techlabs)
                 
                 # ==========================================
                 # ✨ 升級版：科技樹動態動作遮罩 (Tech-Tree Masking)
@@ -1509,6 +1455,10 @@ def main(argv):
                 current_real_count = int(np.round(float(u_pixels) / 10.0))
                 current_real_count = min(current_real_count, 5)
 
+                # ✨ 更新兵力最高紀錄
+                SESSION_TRACKER["marines"] = max(SESSION_TRACKER["marines"], marine_count)
+                SESSION_TRACKER["marauders"] = max(SESSION_TRACKER["marauders"], current_real_count)
+
                 
                 actual_id = agent.locked_action if agent.locked_action is not None else a_id
                 updated_block = getattr(agent, 'active_parameter', 1)
@@ -1537,23 +1487,23 @@ def main(argv):
                 # 1. 里程碑追蹤 (改為即時給分！)
                 if "depot" not in achieved_milestones and current_depots >= 1:
                     achieved_milestones.add("depot")
-                    step_reward += 0.2  # 🌟 即時獎勵！給予適當的正分
-                    print("🌟 里程碑達成：補給站！即時加分 +0.2")
+                    step_reward += 0.02  # 🌟 即時獎勵！給予適當的正分
+                    print("🌟 里程碑達成：補給站！即時加分 +0.02")
 
                 if "barracks" not in achieved_milestones and current_barracks >= 1:
                     achieved_milestones.add("barracks")
-                    step_reward += 0.3  # 🌟 兵營稍微重要一點，給高分
-                    print("🌟 里程碑達成：兵營！即時加分 +0.3")
+                    step_reward += 0.03  # 🌟 兵營稍微重要一點，給高分
+                    print("🌟 里程碑達成：兵營！即時加分 +0.03")
 
                 if "refinery" not in achieved_milestones and current_refineries >= 1:
                     achieved_milestones.add("refinery")
-                    step_reward += 0.2
-                    print("🌟 里程碑達成：瓦斯廠！即時加分 +0.2")
+                    step_reward += 0.02
+                    print("🌟 里程碑達成：瓦斯廠！即時加分 +0.02")
 
                 if "techlab" not in achieved_milestones and current_techlabs >= 1:
                     achieved_milestones.add("techlab")
-                    step_reward += 0.4  # 🌟 科技室是最終目標的關鍵，給最高分
-                    print("🌟 里程碑達成：科技室！即時加分 +0.4")
+                    step_reward += 0.04  # 🌟 科技室是最終目標的關鍵，給最高分
+                    print("🌟 里程碑達成：科技室！即時加分 +0.04")
 
                 # 2. 掠奪者產量追蹤 (不直接給分，用於終局結算)
                 # 找到這段代碼：
@@ -1576,8 +1526,8 @@ def main(argv):
                     # 4. 更新 agent 的屬性 (這行會自動幫 agent 創立或更新該屬性)
                     agent.last_target_count = current_real_count
                     
-                    step_reward += 0.5 * diff 
-                    print(f"🎯 掠奪者產出！目前進度: {current_real_count}/5, 即時加分 +{0.5 * diff}")
+                    step_reward += 0.15 * diff 
+                    print(f"🎯 掠奪者產出！目前進度: {current_real_count}/5, 即時加分 +{0.15 * diff}")
 
                 # 3. 無效動作懲罰 (Process Penalty)
                 # 為了讓訓練穩定，過程中的錯誤還是給予微小的懲罰，促使它尋找合法座標
@@ -1612,6 +1562,7 @@ def main(argv):
                     # 💥 最終總分計算 (0.6, 0.2, 0.1, 0.1)
                     raw_final_score = (
                         (0.6 * time_score) + 
+                        (0.2 * milestone_score)+
                         (0.1 * marauder_score) + 
                         (0.1 * efficiency_score)
                     )
@@ -1767,8 +1718,7 @@ def main(argv):
                         if len(success_memory) % 5 == 0 or is_new_record:
                             success_memory.sort(key=lambda x: x[0], reverse=False)
                             
-                            if len(success_memory) > MAX_ELITE_MEMORY:
-                                success_memory.pop()
+                            success_memory = success_memory[:MAX_ELITE_MEMORY]
                                 
                             print(f"🏆 菁英榜更新！目前收錄 {len(success_memory)} 局，歷史最短時間: {success_memory[0][0]:.0f} 幀")
                             
@@ -1787,7 +1737,7 @@ def main(argv):
                 # ⚠️ 第五步：觸發訓練與更新迴圈變數
                 # ==========================================
                 # 只有在 IS_TRAINING 為 True 時才執行訓練 [cite: 107]
-                if IS_TRAINING and len(memory) >= 10 and train_step_counter % 8 == 0:
+                if IS_TRAINING and len(memory) >= 10 and train_step_counter % 32== 0:
                     train_model()
 
                 hidden_state = (next_hidden_state[0].detach(), next_hidden_state[1].detach())
@@ -1832,13 +1782,30 @@ def main(argv):
                     # 只壓縮用於顯示的分數，不影響任何訓練邏輯
                     
 
+                    # 4. 寫入 CSV 紀錄
+                    # 只壓縮用於顯示的分數，不影響任何訓練邏輯
+
                     print(f"!!! 即將寫入 CSV 的分數是: {final_reward} (型別: {type(final_reward)})")
-                    #logger.log_episode(ep + 1, "掠奪者任務", epsilon, float(episode_reward), current_loop, current_real_count, marine_count)
-                    #log_file = f"d:/RL_Projects/dudu DRQN/log/dqn_training_log_{int(time.time())}.csv"
                     with open(current_session_file, "a", encoding="utf-8") as f:
                         line = f"{ep+1},掠奪者任務,{epsilon:.3f},{final_reward:.4f},{current_loop},{current_real_count},{marine_count}\n"
                         f.write(line)
                     print(f"✅ 已手動強制寫入 CSV: {final_reward:.4f}")
+
+                    # =====================================================
+                    # ✨ 新增：在遊戲結束跳出前，強制「同步最後一幀畫面」
+                    # =====================================================
+                    if RENDER_UI:
+                        current_q_vals = q_actions.cpu().detach().numpy()[0]
+                        
+                        # ⚠️ 關鍵：這裡傳入的是 next_obs 和 next_state，這樣 UI 才會抓到第 5 隻掠奪者
+                        draw_full_hud(
+                            screen, next_obs, brain_model, next_state,
+                            next_allowed_indices, hidden_state, VALID_ACTIONS, current_q_vals
+                        )
+                        pygame.display.flip()  # 強制刷新螢幕更新
+                        
+                        
+
                     break # ✨ 記得加上 break 跳出 while 迴圈
 
                 state = next_state

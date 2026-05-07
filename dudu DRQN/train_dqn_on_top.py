@@ -228,6 +228,9 @@ def main(argv):
     batch_size = 64  # ✨ 新增：每次訓練抓取的樣本數
     train_step_counter = 0
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"🚀 PyTorch is currently using device: {device}") # Add this line
+    if device.type == 'cuda':
+        print(f"🎮 GPU detected: {torch.cuda.get_device_name(0)}") # This should print "NVIDIA GeForce RTX 4070"
     brain_model = QNetwork(state_size, action_size).to(device)
     optimizer = optim.Adam(brain_model.parameters(), lr=0.0005)
     criterion = nn.MSELoss()
@@ -254,10 +257,10 @@ def main(argv):
     else:
         success_memory = []
         
-    MAX_ELITE_MEMORY = 1000
+    MAX_ELITE_MEMORY = 50
 
     gamma = 0.99
-    logger = TrainingLogger() # 使用 TrainingLogger 紀錄產量
+    #logger = TrainingLogger() # 使用 TrainingLogger 紀錄產量
     learn_min = 0.01
     last_action_id = 0   
     current_block = 1 
@@ -1177,7 +1180,7 @@ def main(argv):
 
     # ✨ 全新路線：解除星海視窗鎖定，改為可用滑鼠自由縮放的正常視窗
    # ✨ 全新路線：保持視窗模式，並由程式自動精準校正大小
-    def resize_sc2_to_grid():
+    '''def resize_sc2_to_grid():
         import ctypes
         import time
 
@@ -1217,10 +1220,10 @@ def main(argv):
                 ctypes.windll.user32.SetWindowPos(hwnd, 0, 0, 0, final_w, final_h, 0x0002 | 0x0004)
                 
                 print(f"✅ 星海畫面已精準設定為 {target_w}x{target_h}！你可以抓著標題列自由拖曳了！")
-                break
+                break'''
 
     # 🚀 在啟動星海前，派執行緒去背景等待校正
-    threading.Thread(target=resize_sc2_to_grid, daemon=True).start()
+    #threading.Thread(target=resize_sc2_to_grid, daemon=True).start()
 
     # 原本啟動環境的程式碼保持不動
     with sc2_env.SC2Env(
@@ -1487,23 +1490,23 @@ def main(argv):
                 # 1. 里程碑追蹤 (改為即時給分！)
                 if "depot" not in achieved_milestones and current_depots >= 1:
                     achieved_milestones.add("depot")
-                    step_reward += 0.2  # 🌟 即時獎勵！給予適當的正分
-                    print("🌟 里程碑達成：補給站！即時加分 +0.2")
+                    step_reward += 0.02  # 🌟 即時獎勵！給予適當的正分
+                    print("🌟 里程碑達成：補給站！即時加分 +0.02")
 
                 if "barracks" not in achieved_milestones and current_barracks >= 1:
                     achieved_milestones.add("barracks")
-                    step_reward += 0.3  # 🌟 兵營稍微重要一點，給高分
-                    print("🌟 里程碑達成：兵營！即時加分 +0.3")
+                    step_reward += 0.03  # 🌟 兵營稍微重要一點，給高分
+                    print("🌟 里程碑達成：兵營！即時加分 +0.03")
 
                 if "refinery" not in achieved_milestones and current_refineries >= 1:
                     achieved_milestones.add("refinery")
-                    step_reward += 0.2
-                    print("🌟 里程碑達成：瓦斯廠！即時加分 +0.2")
+                    step_reward += 0.02
+                    print("🌟 里程碑達成：瓦斯廠！即時加分 +0.02")
 
                 if "techlab" not in achieved_milestones and current_techlabs >= 1:
                     achieved_milestones.add("techlab")
-                    step_reward += 0.4  # 🌟 科技室是最終目標的關鍵，給最高分
-                    print("🌟 里程碑達成：科技室！即時加分 +0.4")
+                    step_reward += 0.04  # 🌟 科技室是最終目標的關鍵，給最高分
+                    print("🌟 里程碑達成：科技室！即時加分 +0.04")
 
                 # 2. 掠奪者產量追蹤 (不直接給分，用於終局結算)
                 # 找到這段代碼：
@@ -1526,8 +1529,8 @@ def main(argv):
                     # 4. 更新 agent 的屬性 (這行會自動幫 agent 創立或更新該屬性)
                     agent.last_target_count = current_real_count
                     
-                    step_reward += 0.5 * diff 
-                    print(f"🎯 掠奪者產出！目前進度: {current_real_count}/5, 即時加分 +{0.5 * diff}")
+                    step_reward += 0.15 * diff 
+                    print(f"🎯 掠奪者產出！目前進度: {current_real_count}/5, 即時加分 +{0.15 * diff}")
 
                 # 3. 無效動作懲罰 (Process Penalty)
                 # 為了讓訓練穩定，過程中的錯誤還是給予微小的懲罰，促使它尋找合法座標
@@ -1562,6 +1565,7 @@ def main(argv):
                     # 💥 最終總分計算 (0.6, 0.2, 0.1, 0.1)
                     raw_final_score = (
                         (0.6 * time_score) + 
+                        (0.2 * milestone_score)+
                         (0.1 * marauder_score) + 
                         (0.1 * efficiency_score)
                     )
@@ -1717,8 +1721,7 @@ def main(argv):
                         if len(success_memory) % 5 == 0 or is_new_record:
                             success_memory.sort(key=lambda x: x[0], reverse=False)
                             
-                            if len(success_memory) > MAX_ELITE_MEMORY:
-                                success_memory.pop()
+                            success_memory = success_memory[:MAX_ELITE_MEMORY]
                                 
                             print(f"🏆 菁英榜更新！目前收錄 {len(success_memory)} 局，歷史最短時間: {success_memory[0][0]:.0f} 幀")
                             
@@ -1737,7 +1740,7 @@ def main(argv):
                 # ⚠️ 第五步：觸發訓練與更新迴圈變數
                 # ==========================================
                 # 只有在 IS_TRAINING 為 True 時才執行訓練 [cite: 107]
-                if IS_TRAINING and len(memory) >= 10 and train_step_counter % 8 == 0:
+                if IS_TRAINING and len(memory) >= 10 and train_step_counter % 32== 0:
                     train_model()
 
                 hidden_state = (next_hidden_state[0].detach(), next_hidden_state[1].detach())
@@ -1804,8 +1807,7 @@ def main(argv):
                         )
                         pygame.display.flip()  # 強制刷新螢幕更新
                         
-                        # 暫停 1.5 秒 (1500 毫秒)，讓你看清楚 Target(5) 亮起，再重置遊戲
-                        pygame.time.wait(1500) 
+                        
 
                     break # ✨ 記得加上 break 跳出 while 迴圈
 
