@@ -939,7 +939,7 @@ def main(argv):
         draw_glow_rect(surface, network_rect, colors["panel"], colors["border"], 2)
 
         # 2️⃣ 畫標題
-        surface.blit(fonts["header"].render("DRQN Network", True, colors["title"]),
+        surface.blit(fonts["header"].render("R-DDQN Network", True, colors["title"]),
                     (network_rect[0] + 12, network_rect[1] + 10))
 
         # 3️⃣ 畫內容
