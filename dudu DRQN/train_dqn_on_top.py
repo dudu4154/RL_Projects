@@ -1180,7 +1180,7 @@ def main(argv):
 
     # ✨ 全新路線：解除星海視窗鎖定，改為可用滑鼠自由縮放的正常視窗
    # ✨ 全新路線：保持視窗模式，並由程式自動精準校正大小
-    '''def resize_sc2_to_grid():
+    def resize_sc2_to_grid():
         import ctypes
         import time
 
@@ -1220,10 +1220,10 @@ def main(argv):
                 ctypes.windll.user32.SetWindowPos(hwnd, 0, 0, 0, final_w, final_h, 0x0002 | 0x0004)
                 
                 print(f"✅ 星海畫面已精準設定為 {target_w}x{target_h}！你可以抓著標題列自由拖曳了！")
-                break'''
+                break
 
     # 🚀 在啟動星海前，派執行緒去背景等待校正
-    #threading.Thread(target=resize_sc2_to_grid, daemon=True).start()
+    threading.Thread(target=resize_sc2_to_grid, daemon=True).start()
 
     # 原本啟動環境的程式碼保持不動
     with sc2_env.SC2Env(
