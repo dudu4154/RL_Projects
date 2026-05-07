@@ -1,5 +1,14 @@
 import os
 import random
+
+# --- ✨ 關鍵修正：修復 Python 3.11+ 與 pysc2 的相容性問題 ---
+_orig_shuffle = random.shuffle
+def fixed_shuffle(x, random=None):
+    # 忽略 pysc2 傳入的第二個參數 (lambda)
+    return _orig_shuffle(x)
+random.shuffle = fixed_shuffle
+# -------------------------------------------------------
+
 import numpy as np
 import torch
 import torch.nn as nn
@@ -21,6 +30,8 @@ import production_ai as production_ai
 from production_ai import ProductionAI
 import logging
 from absl import logging as absl_logging
+
+
 
 # 1. 嘗試讀取系統環境變數 SC2PATH
 sc2_path = os.environ.get("SC2PATH")
@@ -45,6 +56,9 @@ if not sc2_path:
 # 屏蔽 features.py 產出的警告訊息
 absl_logging.set_verbosity(absl_logging.ERROR)
 # --- 1. 定義 Action ID 與 Unit ID 的對應  ---
+# 1. 嘗試讀取系統環境變數 SC2PATH
+sc2_path = os.environ.get("SC2PATH")
+
 TARGET_UNIT_MAP = {
     14: production_ai.SCV_ID,       16: 48,  # Marine
     17: 49,  # Reaper              18: production_ai.MARAUDER_ID,
@@ -240,7 +254,7 @@ def main(argv):
     RENDER_UI = True # 總開關
     pygame.init()
     screen = pygame.display.set_mode((1600, 900))
-    pygame.display.set_caption("DRQN 決策中樞 - 中文化遮罩版")
+    pygame.display.set_caption("R-DDQN 決策中樞 - 中文化遮罩版")
     
     # 菁英記憶：改成 List，用來做排行榜
     success_memory = [] 
